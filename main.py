@@ -1,4 +1,3 @@
-# main.py - Pappu Programmer (full copy-paste)
 from dotenv import load_dotenv
 load_dotenv()
 
