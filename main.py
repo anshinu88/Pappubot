@@ -1,3 +1,4 @@
+# main.py - Pappu Programmer (full copy-paste, fixed global issue)
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -185,7 +186,7 @@ def perform_live_search(query: str) -> str:
 def build_normal_prompt(user_name: str, user_text: str, owner_flag: bool, search_summary: str = "") -> str:
     title_name = "Papa ji" if owner_flag else user_name
     detailed = is_detailed_question(user_text)
-    length_line = "Answer thoda detailed de sakte ho (max ~10–12 lines)." if detailed else "Answer chhota / medium rakho (max 2–4 lines)."
+    length_line = "Answer thoda detailed de sakte ho (max ~10–12 lines)." if detailed else "Answer chhota / medium rakho (max 2–4 lines, seedha point pe)."
 
     insults_note = "Allowed to use light roasts." if ALLOW_INSULTS else "Do NOT use abusive slurs. Keep witty but safe."
     profanity_note = "Strong profanity allowed (owner-controlled)." if ALLOW_PROFANITY else "Strong profanity disabled."
@@ -236,30 +237,32 @@ async def send_long_message(channel: discord.TextChannel, text: str):
         for i in range(0, len(text), max_len):
             await channel.send(text[i:i+max_len])
 
+# ---------------- Simple subject extractor (heuristic) ----------------
+def extract_subject_from_text(text: str) -> str:
+    t = text.lower()
+    subjects = ["daru", "whisky", "rum", "vodka", "mobile", "phone", "game", "stranger things", "movie", "series", "song", "laptop", "headphone"]
+    for s in subjects:
+        if s in t:
+            return s
+    return None
+
 # ---------------- Main ask handler (with live search & memory) ----------------
 async def ask_pappu(user: discord.abc.User, text: str, is_announcement: bool, channel: discord.abc.Messageable):
     owner_flag = is_owner(user)
 
-    # 1) Check if this is a short follow-up (like "naam de", "bta naam", "isko bta naam")
+    # 1) short follow-up like "naam de"
     short_followups = ["naam", "name", "bta naam", "bata naam", "bol naam", "uska naam", "isko naam"]
     is_short = len(text.split()) <= 3
     ctx = get_context(user.id)
-    used_context = None
-    if is_short and ctx:
-        # if user gives a short followup, assume they refer to last_subject
-        if any(w in text.lower() for w in short_followups):
-            used_context = ctx
-            # expand text to include last_query for better AI answer or search
-            text = f"{ctx.get('last_query')} — user asked follow-up: {text}"
+    if is_short and ctx and any(w in text.lower() for w in short_followups):
+        text = f"{ctx.get('last_query')} — user follow-up: {text}"
 
-    # 2) Detect if user asked for live info
+    # 2) live info?
     live_triggers = ["aaj", "kab", "news", "release", "date", "search", "khabar", "announce", "kab aayega", "kab aa rahi"]
     wants_live = any(w in text.lower() for w in live_triggers) and SEARCH_PROVIDER != ""
-
     search_summary = ""
     if wants_live:
         search_summary = perform_live_search(text)
-        # if model is configured, use search_summary in prompt and produce friendly reply
         if model:
             prompt = build_normal_prompt(user.display_name, text, owner_flag, search_summary=search_summary)
             try:
@@ -268,12 +271,9 @@ async def ask_pappu(user: discord.abc.User, text: str, is_announcement: bool, ch
                     out = getattr(resp, "text", None)
                     if not out:
                         out = search_summary
-                    # set context if it's a subject-type query (simple heuristic)
-                    if not used_context:
-                        # e.g., "500 me best daru" -> subject = 'daru'
-                        subj = extract_subject_from_text(text)
-                        if subj:
-                            set_context(user.id, subj, text)
+                    subj = extract_subject_from_text(text)
+                    if subj:
+                        set_context(user.id, subj, text)
                     await send_long_message(channel, out)
                     return
             except Exception as e:
@@ -283,27 +283,21 @@ async def ask_pappu(user: discord.abc.User, text: str, is_announcement: bool, ch
             await send_long_message(channel, f"Live search results:\n{search_summary}")
             return
 
-    # 3) Non-live path: build prompt and call model if available
+    # 3) Non-live path
     if is_announcement:
         prompt = build_announcement_prompt(user.display_name, text, owner_flag)
     else:
         prompt = build_normal_prompt(user.display_name, text, owner_flag)
 
-    # set memory for subject detection (simple heuristic)
     subj = extract_subject_from_text(text)
     if subj:
         set_context(user.id, subj, text)
 
-    # If model not configured, provide fallback replies for common casual queries
     if model is None:
-        fallback_forums = {
-            "daru": "Papa ji, ₹500 ke andar Old Monk, McDowell's No.1, Magic Moments jaise options mil jaate.",
-        }
-        for k, v in fallback_forums.items():
-            if k in text.lower():
-                await send_long_message(channel, v)
-                return
-        await channel.send("Papa ji, Gemini key missing. General reply de raha hu — bata kaunsa topic chahiye.")
+        if "daru" in text.lower():
+            await send_long_message(channel, "Papa ji, ₹500 ke budget me Old Monk, McDowell's No.1, Magic Moments jaise options mil jaate.")
+            return
+        await channel.send("Papa ji, Gemini key missing hai, isliye simple reply de paunga. Topic batao.")
         return
 
     try:
@@ -311,25 +305,14 @@ async def ask_pappu(user: discord.abc.User, text: str, is_announcement: bool, ch
             response = model.generate_content(prompt)
             reply = getattr(response, "text", None)
             if not reply:
-                reply = "Papa ji, kuch blank sa aa gaya, dobara bhej do."
+                reply = "Papa ji, kuch blank sa aa gaya, dobara bhejo."
             await send_long_message(channel, reply)
     except Exception as e:
         await channel.send(f"Kuch error aa gaya Papa ji: `{e}`")
 
-# ---------------- Simple subject extractor (heuristic) ----------------
-def extract_subject_from_text(text: str) -> str:
-    # very simple heuristics to pick subject keywords user may ask about
-    t = text.lower()
-    # common subjects
-    subjects = ["daru", "lubricant", "mobile", "phone", "game", "stranger things", "movie", "series", "song", "gadgets", "laptop", "headphone"]
-    for s in subjects:
-        if s in t:
-            return s
-    # fallback: look for words like "kaunsa", "kis", then next noun - heuristic too complex; return None
-    return None
-
 # ---------------- OWNER natural-language admin (extended) ----------------
 async def handle_owner_nl_admin(message: discord.Message, clean_text: str) -> bool:
+    global ALLOW_PROFANITY   # <-- FIX: declare global at top once
     text = clean_text.lower()
     guild = message.guild
     if guild is None:
@@ -470,7 +453,6 @@ async def handle_owner_nl_admin(message: discord.Message, clean_text: str) -> bo
 
     # owner NL to toggle profanity on the fly (in-memory)
     if is_owner(message.author) and ("allow_profanity on" in text or "allow_profanity off" in text or "allow_profanity" in text):
-        global ALLOW_PROFANITY
         if "on" in text:
             ALLOW_PROFANITY = True
             await message.channel.send("ALLOW_PROFANITY set to ON for this session. (Persist by editing .env)")
@@ -497,7 +479,7 @@ async def on_message(message: discord.Message):
     content_lower = message.content.lower()
     invoked = bot.user.mentioned_in(message) or "pappu" in content_lower
 
-   # RETALIATE logic: if someone insults the bot and RETALIATE enabled
+    # RETALIATE logic: if someone insults the bot and RETALIATE enabled
     if RETALIATE and (("pappu" in content_lower) or bot.user.mentioned_in(message)):
         if contains_insult(message.content):
             if not is_owner(message.author):
