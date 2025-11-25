@@ -1,13 +1,16 @@
-# main.py - Pappu Programmer (full patched version with follow-up memory & item extraction)
+# main.py - Pappu Programmer (full final with persistence & secret admin)
 from dotenv import load_dotenv
 load_dotenv()
 
 import os
 import re
+import sys
+import json
 import random
 import time
 import requests
 import html
+import asyncio
 import discord
 from discord.ext import commands
 import google.generativeai as genai
@@ -17,7 +20,7 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 
-# Feature toggles
+# Feature toggles (env defaults)
 ALLOW_INSULTS = os.getenv("ALLOW_INSULTS", "0") == "1"      # allow witty roasts
 RETALIATE = os.getenv("RETALIATE", "0") == "1"              # auto reply when bot insulted
 ALLOW_PROFANITY = os.getenv("ALLOW_PROFANITY", "0") == "1"  # allow stronger profanity (owner control)
@@ -32,6 +35,63 @@ GOOGLE_CSE_ID = os.getenv("GOOGLE_CSE_ID", "")
 # Structure: { user_id: {"last_subject":"daru","last_query":"500 ke andar daru brand", "items": [...], "ts":unix_ts} }
 CONTEXT_MEMORY = {}
 MEMORY_TTL = 60 * 60 * 6  # 6 hours memory retention (adjustable)
+
+# ---------- Assistant persistence & secret controls ----------
+SETTINGS_FILE = "pappu_settings.json"
+MEMORY_FILE = "pappu_memory.json"
+
+# default runtime settings (persisted)
+RUNTIME_SETTINGS = {
+    "owner_dm_only": False,
+    "stealth": False,
+    "mode": "funny",  # options: funny|angry|serious
+    "allow_profanity": ALLOW_PROFANITY  # sync with env default on first run
+}
+
+def load_persistent_state():
+    try:
+        if os.path.exists(SETTINGS_FILE):
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                RUNTIME_SETTINGS.update(data.get("settings", {}))
+        if os.path.exists(MEMORY_FILE):
+            with open(MEMORY_FILE, "r", encoding="utf-8") as f:
+                mem = json.load(f)
+                for k, v in mem.items():
+                    try:
+                        CONTEXT_MEMORY[int(k)] = v
+                    except Exception:
+                        CONTEXT_MEMORY[k] = v
+    except Exception as e:
+        print("⚠️ Error loading persistent state:", e)
+
+def save_persistent_state():
+    try:
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump({"settings": RUNTIME_SETTINGS}, f, ensure_ascii=False, indent=2)
+        mem_to_save = {str(k): v for k, v in CONTEXT_MEMORY.items()}
+        with open(MEMORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(mem_to_save, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print("⚠️ Error saving persistent state:", e)
+
+def apply_mode(mode: str):
+    mode = mode.lower()
+    if mode not in ["funny","angry","serious"]:
+        return False
+    RUNTIME_SETTINGS["mode"] = mode
+    if mode == "angry":
+        RUNTIME_SETTINGS["owner_dm_only"] = False
+    return True
+
+# call once at startup
+load_persistent_state()
+
+# periodic autosave (background)
+async def periodic_autosave(interval_seconds: int = 300):
+    while True:
+        await asyncio.sleep(interval_seconds)
+        save_persistent_state()
 
 # ------------------------------------------------
 
@@ -75,14 +135,12 @@ SAFE_ROAST_POOL = [
     "{name}, chup reh ke bhi banda classy lag sakta hai — try kar."
 ]
 
-# Profane but non-protected (owner-controlled). Use responsibly.
 PROFANE_ROAST_POOL = [
     "{name}, asli baat: tera dimag chain se so nahi paata; waha logic nahi milta. 😆",
     "{name}, tu itna bakwaas kar raha hai ki mera buffer overflow ho raha hai. Chill!",
     "{name}, thoda chup kar. Teri comedy paid subscription wali ho gayi hai — mujhe block karne ka man kar raha."
 ]
 
-# markers to detect insults (transliterated hindi profanities). Avoid protected-class slurs.
 PROFANITY_MARKERS = ["chutiya", "gandu", "saala", "saale", "bsdk", "mc", "madarchod", "bhosdike"]
 
 # ---------------- Helpers: memory, detection, roasts ----------------
@@ -99,12 +157,6 @@ def prune_memory():
         del CONTEXT_MEMORY[uid]
 
 def set_context(user_id: int, subject: str, query: str, items: list | None = None):
-    """
-    Save short-term context for a user.
-    - subject: short subject string (eg. "daru", "phone")
-    - query: original user query text
-    - items: optional list of items (eg. ['Realme Narzo', 'Redmi Note'])
-    """
     entry = {"last_subject": subject, "last_query": query, "ts": clean_now()}
     if items:
         entry["items"] = items
@@ -134,7 +186,7 @@ def contains_insult(text: str) -> bool:
     return False
 
 def choose_roast(target_name: str, profane: bool = False) -> str:
-    if profane and ALLOW_PROFANITY:
+    if profane and (ALLOW_PROFANITY or RUNTIME_SETTINGS.get("allow_profanity", False)):
         return random.choice(PROFANE_ROAST_POOL).format(name=target_name)
     return random.choice(SAFE_ROAST_POOL).format(name=target_name)
 
@@ -198,7 +250,7 @@ def build_normal_prompt(user_name: str, user_text: str, owner_flag: bool, search
     length_line = "Answer thoda detailed de sakte ho (max ~10–12 lines)." if detailed else "Answer chhota / medium rakho (max 2–4 lines, seedha point pe)."
 
     insults_note = "Allowed to use light roasts." if ALLOW_INSULTS else "Do NOT use abusive slurs. Keep witty but safe."
-    profanity_note = "Strong profanity allowed (owner-controlled)." if ALLOW_PROFANITY else "Strong profanity disabled."
+    profanity_note = "Strong profanity allowed (owner-controlled)." if (ALLOW_PROFANITY or RUNTIME_SETTINGS.get("allow_profanity", False)) else "Strong profanity disabled."
 
     prompt = f"""{PERSONALITY}
 
@@ -263,16 +315,10 @@ def extract_subject_from_text(text: str) -> str:
 
 # ---------------- Step-2: extract items from reply (new helper) ----------------
 def extract_items_from_text(text: str) -> list:
-    """
-    Heuristic extractor: pulls bullet lists, comma-lists or short lines that look like item names.
-    Returns list of cleaned item strings (max ~10).
-    """
     if not text:
         return []
 
     items = []
-
-    # bullets or numbered lists
     for line in text.splitlines():
         s = line.strip()
         if s.startswith("•") or s.startswith("-") or re.match(r"^\d+\.", s):
@@ -281,7 +327,6 @@ def extract_items_from_text(text: str) -> list:
             if s:
                 items.append(s)
 
-    # comma-based short lists
     if not items:
         for line in text.splitlines():
             if "," in line and len(line) < 200:
@@ -304,12 +349,21 @@ def extract_items_from_text(text: str) -> list:
 async def ask_pappu(user: discord.abc.User, text: str, is_announcement: bool, channel: discord.abc.Messageable):
     owner_flag = is_owner(user)
 
+    # If owner_dm_only active and user is not owner and this is in guild, ignore politely
+    if RUNTIME_SETTINGS.get("owner_dm_only") and not is_owner(user):
+        try:
+            # only respond to owner DMs when mode enabled; in guild mention a tiny message
+            if isinstance(channel, discord.TextChannel):
+                await channel.send("Papa ji, maintenance mode chalu hai — abhi sirf owner se reply karta hoon.")
+            return
+        except Exception:
+            return
+
     # 1) short follow-up like "naam de"
     short_followups = ["naam", "name", "bta naam", "bata naam", "bol naam", "uska naam", "isko naam", "inme se", "inme se kaun"]
     is_short = len(text.split()) <= 5
     ctx = get_context(user.id)
     if is_short and ctx and any(w in text.lower() for w in short_followups):
-        # if we have stored items, attach them to the follow-up so model knows the list
         items = ctx.get("items")
         if items:
             items_str = ", ".join(items[:8])
@@ -332,7 +386,6 @@ async def ask_pappu(user: discord.abc.User, text: str, is_announcement: bool, ch
                     if not out:
                         out = search_summary
 
-                    # try to extract subject + items from the reply for follow-ups
                     subj = extract_subject_from_text(text)
                     items = extract_items_from_text(out)
                     if subj:
@@ -355,13 +408,10 @@ async def ask_pappu(user: discord.abc.User, text: str, is_announcement: bool, ch
 
     subj = extract_subject_from_text(text)
     if subj:
-        # set initial context (items will be saved after reply generation)
         set_context(user.id, subj, text)
 
     if model is None:
-        # fallback canned replies if Gemini not configured
         if "daru" in text.lower():
-            # set some basic items so follow-ups work
             set_context(user.id, "daru", text, items=["Old Monk", "McDowell's No.1", "Magic Moments"])
             await send_long_message(channel, "Papa ji, ₹500 ke budget me Old Monk, McDowell's No.1, Magic Moments jaise options mil jaate.")
             return
@@ -375,7 +425,6 @@ async def ask_pappu(user: discord.abc.User, text: str, is_announcement: bool, ch
             if not reply:
                 reply = "Papa ji, kuch blank sa aa gaya, dobara bhejo."
 
-            # extract items & save context for follow-ups
             subj = extract_subject_from_text(text)
             items = extract_items_from_text(reply)
             if subj:
@@ -384,6 +433,79 @@ async def ask_pappu(user: discord.abc.User, text: str, is_announcement: bool, ch
             await send_long_message(channel, reply)
     except Exception as e:
         await channel.send(f"Kuch error aa gaya Papa ji: `{e}`")
+
+# ---------------- Owner-only secret/admin commands ----------------
+async def handle_secret_admin(message: discord.Message, clean_text: str) -> bool:
+    if not is_owner(message.author):
+        return False
+
+    text = clean_text.lower().strip()
+
+    # Shutdown
+    if text in ("pappu shutdown", "pappu stop", "pappu sleep"):
+        await message.channel.send("Theek hai Papa ji, going offline. 👋")
+        save_persistent_state()
+        await bot.close()
+        return True
+
+    # Restart (best-effort)
+    if text in ("pappu restart", "pappu reboot"):
+        await message.channel.send("Restarting now, Papa ji... 🔁")
+        save_persistent_state()
+        try:
+            python = sys.executable
+            os.execv(python, [python] + sys.argv)
+        except Exception as e:
+            await message.channel.send(f"Restart failed: `{e}` — please restart from host panel.")
+        return True
+
+    # Owner DM only mode toggle
+    if text.startswith("pappu owner_dm"):
+        if "on" in text:
+            RUNTIME_SETTINGS["owner_dm_only"] = True
+            save_persistent_state()
+            await message.channel.send("Owner DM only mode ON. Sirf Papa ji ke DMs reply karunga.")
+        elif "off" in text:
+            RUNTIME_SETTINGS["owner_dm_only"] = False
+            save_persistent_state()
+            await message.channel.send("Owner DM only mode OFF. Normal mode.")
+        else:
+            await message.channel.send("Use: `pappu owner_dm on` or `pappu owner_dm off`")
+        return True
+
+    # Stealth toggle
+    if text.startswith("pappu stealth"):
+        if "on" in text:
+            RUNTIME_SETTINGS["stealth"] = True
+            save_persistent_state()
+            await message.channel.send("Stealth ON. Trying to hide status (best effort).")
+            try:
+                await bot.change_presence(status=discord.Status.invisible)
+            except Exception:
+                pass
+        elif "off" in text:
+            RUNTIME_SETTINGS["stealth"] = False
+            save_persistent_state()
+            await message.channel.send("Stealth OFF. Back to normal status.")
+            try:
+                await bot.change_presence(status=discord.Status.online)
+            except Exception:
+                pass
+        else:
+            await message.channel.send("Use: `pappu stealth on` or `pappu stealth off`")
+        return True
+
+    # Mode change
+    if text.startswith("pappu mode"):
+        parts = text.split()
+        if len(parts) >= 3 and apply_mode(parts[2]):
+            save_persistent_state()
+            await message.channel.send(f"Mode set to `{parts[2]}`. Applied.")
+        else:
+            await message.channel.send("Usage: `pappu mode funny|angry|serious`")
+        return True
+
+    return False
 
 # ---------------- OWNER natural-language admin (extended) ----------------
 async def handle_owner_nl_admin(message: discord.Message, clean_text: str) -> bool:
@@ -511,8 +633,7 @@ async def handle_owner_nl_admin(message: discord.Message, clean_text: str) -> bo
                 await message.channel.send("Ban list me user nahi mila.")
                 return True
             await guild.unban(user_obj, reason="Owner unban via Pappu")
-            await
-message.channel.send(f"{user_obj} ko unban kar diya.")
+            await message.channel.send(f"{user_obj} ko unban kar diya.")
         except Exception as e:
             await message.channel.send(f"Error: `{e}`")
         return True
@@ -522,18 +643,22 @@ message.channel.send(f"{user_obj} ko unban kar diya.")
         if not target_member:
             await message.channel.send("Kisko insult bhejna hai Papa ji? @mention karke bolo.")
             return True
-        profane = ALLOW_PROFANITY
+        profane = RUNTIME_SETTINGS.get("allow_profanity", ALLOW_PROFANITY)
         roast = choose_roast(target_member.display_name, profane=profane)
         await message.channel.send(roast)
         return True
 
-    # owner NL to toggle profanity on the fly (in-memory)
+    # owner NL to toggle profanity on the fly (in-memory + persisted)
     if is_owner(message.author) and ("allow_profanity on" in text or "allow_profanity off" in text or "allow_profanity" in text):
         if "on" in text:
             ALLOW_PROFANITY = True
-            await message.channel.send("ALLOW_PROFANITY set to ON for this session. (Persist by editing .env)")
+            RUNTIME_SETTINGS["allow_profanity"] = True
+            save_persistent_state()
+            await message.channel.send("ALLOW_PROFANITY set to ON for this session. (Persisted.)")
         elif "off" in text:
             ALLOW_PROFANITY = False
+            RUNTIME_SETTINGS["allow_profanity"] = False
+            save_persistent_state()
             await message.channel.send("ALLOW_PROFANITY set to OFF for this session.")
         else:
             await message.channel.send("Use: 'pappu allow_profanity on' or 'pappu allow_profanity off'")
@@ -545,10 +670,20 @@ message.channel.send(f"{user_obj} ko unban kar diya.")
 @bot.event
 async def on_ready():
     print(f"✅ {bot.user} online hai Papa ji!")
+    try:
+        bot.loop.create_task(periodic_autosave(300))
+    except Exception:
+        pass
+    try:
+        if RUNTIME_SETTINGS.get("stealth"):
+            await bot.change_presence(status=discord.Status.invisible)
+        else:
+            await bot.change_presence(status=discord.Status.online)
+    except Exception:
+        pass
 
 @bot.event
 async def on_message(message: discord.Message):
-    # ignore other bots
     if message.author.bot:
         return
 
@@ -559,17 +694,22 @@ async def on_message(message: discord.Message):
     if RETALIATE and (("pappu" in content_lower) or bot.user.mentioned_in(message)):
         if contains_insult(message.content):
             if not is_owner(message.author):
-                profane = ALLOW_PROFANITY
+                profane = RUNTIME_SETTINGS.get("allow_profanity", ALLOW_PROFANITY)
                 await message.channel.send(choose_roast(message.author.display_name, profane=profane))
                 return
 
     if invoked:
-        # clean text
         clean_text = (
             message.content.replace(f"<@{bot.user.id}>", "").replace(f"<@!{bot.user.id}>", "").strip()
         )
 
-        # try owner NL admin first
+        # Try secret admin commands (owner-only) first
+        handled_secret = await handle_secret_admin(message, clean_text)
+        if handled_secret:
+            await bot.process_commands(message)
+            return
+
+        # OWNER NL admin
         if is_owner(message.author):
             handled = await handle_owner_nl_admin(message, clean_text)
             if handled:
@@ -581,7 +721,6 @@ async def on_message(message: discord.Message):
             name = "Papa ji" if is_owner(message.author) else message.author.name
             await message.channel.send(f"Haan {name}, bol kya scene hai? 😎")
         else:
-            # main handler
             await ask_pappu(message.author, clean_text, False, message.channel)
 
     await bot.process_commands(message)
@@ -598,8 +737,15 @@ async def ask_cmd(ctx, *, question: str):
 
 # ---------------- RUN ----------------
 if __name__ == "__main__":
+    # sync runtime allow_profanity with env default on first run
+    if "allow_profanity" not in RUNTIME_SETTINGS:
+        RUNTIME_SETTINGS["allow_profanity"] = ALLOW_PROFANITY
+
     if not DISCORD_TOKEN:
         print("❌ DISCORD_TOKEN missing!")
     else:
-        bot.run(DISCORD_TOKEN)
-```0
+        try:
+            bot.run(DISCORD_TOKEN)
+        finally:
+            # on exit, save state
+            save_persistent_state()
