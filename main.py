@@ -98,8 +98,18 @@ def prune_memory():
     for uid in to_delete:
         del CONTEXT_MEMORY[uid]
 
-def set_context(user_id: int, subject: str, query: str):
-    CONTEXT_MEMORY[user_id] = {"last_subject": subject, "last_query": query, "ts": clean_now()}
+def set_context(user_id: int, subject: str, query: str, items: list | None = None):
+    """
+    Save short-term context for a user.
+    - subject: short subject string (eg. "daru", "phone")
+    - query: original user query text
+    - items: optional list of items (eg. ['Realme Narzo', 'Redmi Note'])
+    """
+    entry = {"last_subject": subject, "last_query": query, "ts": clean_now()}
+    if items:
+        # store items as a list of strings
+        entry["items"] = items
+    CONTEXT_MEMORY[user_id] = entry
 
 def get_context(user_id: int):
     prune_memory()
