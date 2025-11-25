@@ -93,6 +93,40 @@ def apply_mode(mode: str):
 
 # load saved settings/memory
 load_persistent_state()
+# ---------- MISSING HELPERS: send_long_message + periodic_autosave ----------
+async def send_long_message(channel: discord.TextChannel, text: str):
+    """Send long text safely (Discord ~2000 char limit)."""
+    if not text:
+        try:
+            await channel.send("Papa ji, reply khali aa gaya, dobara bhejo. 😅")
+        except Exception:
+            pass
+        return
+    max_len = 1900
+    try:
+        if len(text) <= max_len:
+            await channel.send(text)
+        else:
+            for i in range(0, len(text), max_len):
+                chunk = text[i:i + max_len]
+                await channel.send(chunk)
+    except Exception:
+        # fallback: try smaller chunks if big embed or other error
+        try:
+            for i in range(0, len(text), 1000):
+                await channel.send(text[i:i+1000])
+        except Exception:
+            pass
+
+async def periodic_autosave(interval_seconds: int = 300):
+    """Background task: periodically save persistent state to disk."""
+    while True:
+        try:
+            await asyncio.sleep(interval_seconds)
+            save_persistent_state()
+        except Exception:
+            # swallow errors so task doesn't die
+            await asyncio.sleep(interval_seconds)
 # ---------- PART 2: GEMINI CONFIG + DISCORD BOT INIT + PERSONALITY ----------
 # Gemini config (if provided)
 if GEMINI_API_KEY:
