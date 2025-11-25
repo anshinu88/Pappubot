@@ -1,4 +1,4 @@
-# main.py - Pappu Programmer (full copy-paste, fixed global issue)
+# main.py - Pappu Programmer (full patched version with follow-up memory & item extraction)
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -29,7 +29,7 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
 GOOGLE_CSE_ID = os.getenv("GOOGLE_CSE_ID", "")
 
 # In-memory conversation memory (short-term per-user)
-# Structure: { user_id: {"last_subject":"daru","last_query":"500 ke andar daru brand", "ts":unix_ts} }
+# Structure: { user_id: {"last_subject":"daru","last_query":"500 ke andar daru brand", "items": [...], "ts":unix_ts} }
 CONTEXT_MEMORY = {}
 MEMORY_TTL = 60 * 60 * 6  # 6 hours memory retention (adjustable)
 
@@ -92,7 +92,7 @@ def clean_now():
 def prune_memory():
     now = clean_now()
     to_delete = []
-    for uid, info in CONTEXT_MEMORY.items():
+    for uid, info in list(CONTEXT_MEMORY.items()):
         if now - info.get("ts", 0) > MEMORY_TTL:
             to_delete.append(uid)
     for uid in to_delete:
@@ -107,7 +107,6 @@ def set_context(user_id: int, subject: str, query: str, items: list | None = Non
     """
     entry = {"last_subject": subject, "last_query": query, "ts": clean_now()}
     if items:
-        # store items as a list of strings
         entry["items"] = items
     CONTEXT_MEMORY[user_id] = entry
 
@@ -249,23 +248,74 @@ async def send_long_message(channel: discord.TextChannel, text: str):
 
 # ---------------- Simple subject extractor (heuristic) ----------------
 def extract_subject_from_text(text: str) -> str:
+    if not text:
+        return ""
     t = text.lower()
-    subjects = ["daru", "whisky", "rum", "vodka", "mobile", "phone", "game", "stranger things", "movie", "series", "song", "laptop", "headphone"]
-    for s in subjects:
-        if s in t:
-            return s
-    return None
+    if "daru" in t or "alcohol" in t or "drink" in t:
+        return "daru"
+    if "phone" in t or "mobile" in t:
+        return "phone"
+    if "laptop" in t:
+        return "laptop"
+    if "movie" in t or "series" in t or "film" in t:
+        return "movie"
+    return ""
+
+# ---------------- Step-2: extract items from reply (new helper) ----------------
+def extract_items_from_text(text: str) -> list:
+    """
+    Heuristic extractor: pulls bullet lists, comma-lists or short lines that look like item names.
+    Returns list of cleaned item strings (max ~10).
+    """
+    if not text:
+        return []
+
+    items = []
+
+    # bullets or numbered lists
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("•") or s.startswith("-") or re.match(r"^\d+\.", s):
+            s = re.sub(r"^[•\-\d\.\s]+", "", s).strip()
+            s = s.split("—")[0].strip()
+            if s:
+                items.append(s)
+
+    # comma-based short lists
+    if not items:
+        for line in text.splitlines():
+            if "," in line and len(line) < 200:
+                parts = [p.strip() for p in line.split(",") if p.strip()]
+                for p in parts:
+                    if 1 <= len(p.split()) <= 6:
+                        items.append(p)
+
+    cleaned = []
+    for it in items:
+        it = re.sub(r"[\"'`]+", "", it).strip()
+        if it and it.lower() not in [c.lower() for c in cleaned]:
+            cleaned.append(it)
+        if len(cleaned) >= 10:
+            break
+
+    return cleaned
 
 # ---------------- Main ask handler (with live search & memory) ----------------
 async def ask_pappu(user: discord.abc.User, text: str, is_announcement: bool, channel: discord.abc.Messageable):
     owner_flag = is_owner(user)
 
     # 1) short follow-up like "naam de"
-    short_followups = ["naam", "name", "bta naam", "bata naam", "bol naam", "uska naam", "isko naam"]
-    is_short = len(text.split()) <= 3
+    short_followups = ["naam", "name", "bta naam", "bata naam", "bol naam", "uska naam", "isko naam", "inme se", "inme se kaun"]
+    is_short = len(text.split()) <= 5
     ctx = get_context(user.id)
     if is_short and ctx and any(w in text.lower() for w in short_followups):
-        text = f"{ctx.get('last_query')} — user follow-up: {text}"
+        # if we have stored items, attach them to the follow-up so model knows the list
+        items = ctx.get("items")
+        if items:
+            items_str = ", ".join(items[:8])
+            text = f"{ctx.get('last_query')} — items: {items_str} — follow-up: {text}"
+        else:
+            text = f"{ctx.get('last_query')} — user follow-up: {text}"
 
     # 2) live info?
     live_triggers = ["aaj", "kab", "news", "release", "date", "search", "khabar", "announce", "kab aayega", "kab aa rahi"]
@@ -281,9 +331,13 @@ async def ask_pappu(user: discord.abc.User, text: str, is_announcement: bool, ch
                     out = getattr(resp, "text", None)
                     if not out:
                         out = search_summary
+
+                    # try to extract subject + items from the reply for follow-ups
                     subj = extract_subject_from_text(text)
+                    items = extract_items_from_text(out)
                     if subj:
-                        set_context(user.id, subj, text)
+                        set_context(user.id, subj, text, items=items if items else None)
+
                     await send_long_message(channel, out)
                     return
             except Exception as e:
@@ -301,10 +355,14 @@ async def ask_pappu(user: discord.abc.User, text: str, is_announcement: bool, ch
 
     subj = extract_subject_from_text(text)
     if subj:
+        # set initial context (items will be saved after reply generation)
         set_context(user.id, subj, text)
 
     if model is None:
+        # fallback canned replies if Gemini not configured
         if "daru" in text.lower():
+            # set some basic items so follow-ups work
+            set_context(user.id, "daru", text, items=["Old Monk", "McDowell's No.1", "Magic Moments"])
             await send_long_message(channel, "Papa ji, ₹500 ke budget me Old Monk, McDowell's No.1, Magic Moments jaise options mil jaate.")
             return
         await channel.send("Papa ji, Gemini key missing hai, isliye simple reply de paunga. Topic batao.")
@@ -316,13 +374,20 @@ async def ask_pappu(user: discord.abc.User, text: str, is_announcement: bool, ch
             reply = getattr(response, "text", None)
             if not reply:
                 reply = "Papa ji, kuch blank sa aa gaya, dobara bhejo."
+
+            # extract items & save context for follow-ups
+            subj = extract_subject_from_text(text)
+            items = extract_items_from_text(reply)
+            if subj:
+                set_context(user.id, subj, text, items=items if items else None)
+
             await send_long_message(channel, reply)
     except Exception as e:
         await channel.send(f"Kuch error aa gaya Papa ji: `{e}`")
 
 # ---------------- OWNER natural-language admin (extended) ----------------
 async def handle_owner_nl_admin(message: discord.Message, clean_text: str) -> bool:
-    global ALLOW_PROFANITY   # <-- FIX: declare global at top once
+    global ALLOW_PROFANITY   # declare global at start
     text = clean_text.lower()
     guild = message.guild
     if guild is None:
@@ -446,7 +511,8 @@ async def handle_owner_nl_admin(message: discord.Message, clean_text: str) -> bo
                 await message.channel.send("Ban list me user nahi mila.")
                 return True
             await guild.unban(user_obj, reason="Owner unban via Pappu")
-            await message.channel.send(f"{user_obj} ko unban kar diya.")
+            await
+message.channel.send(f"{user_obj} ko unban kar diya.")
         except Exception as e:
             await message.channel.send(f"Error: `{e}`")
         return True
@@ -536,3 +602,4 @@ if __name__ == "__main__":
         print("❌ DISCORD_TOKEN missing!")
     else:
         bot.run(DISCORD_TOKEN)
+```0
