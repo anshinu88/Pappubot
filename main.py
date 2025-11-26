@@ -1,4 +1,4 @@
-# ---------- PART 1: Imports, dotenv, globals, Gemini config ----------
+# -------------------- main.py (PART 1/8) --------------------
 import os
 import sys
 import re
@@ -9,59 +9,62 @@ import asyncio
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
-import requests
 from dotenv import load_dotenv
 
-# Gemini (Google generative AI)
-import google.generativeai as genai
-
-# Discord
+# Discord imports (discord.py v2)
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
+from discord import app_commands
 
-# Load .env
+# Optional Google generative ai (if installed & key present)
+try:
+    import google.generativeai as genai
+except Exception:
+    genai = None
+
 load_dotenv()
 
-# Environment / Config
+# -------------------- CONFIG / ENV --------------------
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
+LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID", "0")) if os.getenv("LOG_CHANNEL_ID") else None
 
-# Gemini API key (optional)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-
-# Live-search keys (optional)
 SERPAPI_KEY = os.getenv("SERPAPI_KEY", "")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
 GOOGLE_CSE_ID = os.getenv("GOOGLE_CSE_ID", "")
 
-# Configure Gemini safely if key present
-if GEMINI_API_KEY:
-    try:
-        genai.configure(api_key=GEMINI_API_KEY)
-    except Exception as e:
-        print("Warning: Gemini config failed:", e)
+# Files (host-side)
+PERSIST_FILE = Path("pappu_state.json")
+SLURS_FILE = "slurs.txt"          # one keyword/phrase per line (host-side)
+ROASTS_STRONG_FILE = "roasts_strong.txt"  # optional host file for owner raw templates
 
-# Bot init
+# Bot setup
 PREFIX = "!"
 INTENTS = discord.Intents.default()
 INTENTS.message_content = True
 INTENTS.members = True
 bot = commands.Bot(command_prefix=PREFIX, intents=INTENTS)
+tree = bot.tree  # for slash commands
 
-# Persistence file
-PERSIST_FILE = Path("pappu_state.json")
-# ---------- PART 2: Runtime settings, persistence, model init, helpers ----------
+# Configure Gemini if available
+if GEMINI_API_KEY and genai is not None:
+    try:
+        genai.configure(api_key=GEMINI_API_KEY)
+    except Exception as e:
+        print("Warning: Gemini configure failed:", e)
+# -------------------- main.py (PART 2/8) --------------------
+# -------------------- RUNTIME SETTINGS + PERSISTENCE --------------------
 RUNTIME_SETTINGS: Dict[str, Any] = {
     "owner_dm_only": False,
     "stealth": False,
-    "english_lock": False,     # True => only English replies; False => only Hinglish
-    "allow_profanity": False,  # owner toggles this
+    "english_lock": False,
+    "allow_profanity": False,
+    "auto_retaliate": False,
+    "auto_retaliate_cooldown": 60,
     "mode": "funny",
     "memory": {}
 }
-
-# convenience var (kept in sync)
-ALLOW_PROFANITY = RUNTIME_SETTINGS.get("allow_profanity", False)
 
 def save_persistent_state():
     try:
@@ -70,50 +73,30 @@ def save_persistent_state():
         print("Warning: failed saving persistent state:", e)
 
 def load_persistent_state():
-    global RUNTIME_SETTINGS, ALLOW_PROFANITY
+    global RUNTIME_SETTINGS
     try:
         if PERSIST_FILE.exists():
             data = json.loads(PERSIST_FILE.read_text(encoding="utf-8"))
             if isinstance(data, dict):
                 RUNTIME_SETTINGS.update(data)
-                ALLOW_PROFANITY = RUNTIME_SETTINGS.get("allow_profanity", ALLOW_PROFANITY)
     except Exception as e:
         print("Warning: failed loading persistent state:", e)
 
-# Load persisted settings at startup
 load_persistent_state()
 
-# Initialize Gemini model object if configured (safe)
-try:
-    model = genai.GenerativeModel("gemini-2.5-flash") if GEMINI_API_KEY else None
-except Exception as e:
-    print("Warning: Gemini model init failed:", e)
-    model = None
-
-# Basic helpers
-def is_owner(user: discord.abc.User) -> bool:
+# -------------------- MODEL (optional) --------------------
+model = None
+if GEMINI_API_KEY and genai is not None:
     try:
-        return user.id == OWNER_ID
-    except Exception:
-        return False
+        model = genai.GenerativeModel("gemini-2.5-flash")
+    except Exception as e:
+        print("Warning: Gemini model init failed:", e)
+        model = None
 
-def apply_mode(mode: str) -> bool:
-    if not mode:
-        return False
-    mode = mode.lower()
-    allowed = ["funny","angry","serious","flirty","sarcastic","bhaukaal","kid","toxic","coder","bhai-ji","dark","normal"]
-    if mode not in allowed:
-        return False
-    if mode == "normal":
-        mode = "funny"
-    RUNTIME_SETTINGS["mode"] = mode
-    save_persistent_state()
-    return True
-
-# Short context memory (per-user, transient)
+# -------------------- CONTEXT MEMORY (in-memory + persisted) --------------------
 CONTEXT_MEMORY: Dict[int, Dict[str, Any]] = {}
-MEMORY_TTL = 60 * 60 * 6  # 6 hours
-
+MEMORY_TTL = 60 * 60 * 6  # 6 hours TTL for simple memory
+# -------------------- main.py (PART 3/8) --------------------
 def _now_ts() -> int:
     return int(time.time())
 
@@ -131,34 +114,120 @@ def set_context(user_id: int, subject: str, query: str, items: Optional[List[str
 def get_context(user_id: int) -> Optional[Dict[str, Any]]:
     prune_memory()
     return CONTEXT_MEMORY.get(user_id)
-# ---------- PART 3: Roasts, profanity markers, language helpers, send_long_message ----------
-# Roasts (safe and stronger)
+
+# -------------------- SLURS LOADER & STRONG ROASTS LOADER --------------------
+def load_slurs():
+    slurs = set()
+    try:
+        p = os.path.join(os.getcwd(), SLURS_FILE)
+        with open(p, "r", encoding="utf8") as f:
+            for line in f:
+                w = line.strip()
+                if not w or w.startswith("#"):
+                    continue
+                slurs.add(w.lower())
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print("Error loading slurs:", e)
+    return slurs
+
+def load_strong_roasts():
+    roasts = []
+    try:
+        p = os.path.join(os.getcwd(), ROASTS_STRONG_FILE)
+        with open(p, "r", encoding="utf8") as f:
+            for line in f:
+                t = line.strip()
+                if t and not t.startswith("#"):
+                    roasts.append(t)
+    except Exception:
+        pass
+    return roasts
+
+PROFANE_KEYWORDS = load_slurs()
+ROASTS_STRONG = load_strong_roasts()
+# -------------------- main.py (PART 4/8) --------------------
+# background periodic reload (optional)
+@tasks.loop(minutes=5.0)
+async def periodic_reload_slurs():
+    global PROFANE_KEYWORDS
+    PROFANE_KEYWORDS = load_slurs()
+
+@periodic_reload_slurs.before_loop
+async def before_reload():
+    await bot.wait_until_ready()
+
+periodic_reload_slurs.start()
+
+# -------------------- ROASTS, MASKING, HELPERS --------------------
 SAFE_ROASTS = [
-    "{name}, tera code dekh ke mera debugger bhi confuse ho gaya. 😂",
-    "{name}, pehle chai pe lele, phir bug hunt karein.",
-    "{name}, thoda soch ke bol, abhi toh argument ka bhi breakpoint lag gaya."
-]
-PROFANE_ROASTS = [
-    "{name}, tu asli baklol nikla yaar — fix kar warna main aag laga dunga. 😅",
-    "{name}, tera logic itna weak hai ki mera try/except bhi fail kar raha.",
-    "{name}, chill kar aur phir se padh, warna gaali se kaam nahi chalega."
+    "{name}, tera logic dekh ke mere debugger ko chhutti leni padi. 😂",
+    "{name}, thoda sambhal ke bol — tumhara drama unnecessary hai.",
+    "{name}, pehle apna ego update kar, phir awaaz nikaal."
 ]
 
-# Profanity detection keywords (customize on-host). Avoid protected-class slurs.
-PROFANE_KEYWORDS = ["chutiya", "madarchod", "bhosd", "bc", "saale", "mc", "bsdk", "gandu"]
+def mask_slur(slur: str) -> str:
+    s = slur.strip()
+    if len(s) <= 2:
+        return s[0] + "*"*(len(s)-1) if len(s)>1 else "*"
+    return s[0] + "*"*(len(s)-2) + s[-1]
 
-# Language strictness: per your request english_lock == True => always English; False => always Hinglish
-def choose_language_for_reply(_: str) -> str:
-    return "en" if RUNTIME_SETTINGS.get("english_lock", False) else "hi"
-
-# Devanagari detection (not used for strict mode but kept if needed)
-DEVANAGARI_RE = re.compile(r"[\u0900-\u097F]")
-
-def choose_roast(name: str, profane: bool = False) -> str:
+def choose_roast(display_name: str, profane: bool = False, matched_slur: str = None) -> str:
+    name = display_name or "bhai"
     if profane:
-        return random.choice(PROFANE_ROASTS).format(name=name)
-    return random.choice(SAFE_ROASTS).format(name=name)
+        if matched_slur:
+            m = mask_slur(matched_slur)
+            templates = [
+                "Arre {name}, ab itna beizzati mat kar — log tumhe '{m}' bol rahe hain, soch le.",
+                "{name}, tu sach mein {m} jaisa behave kar raha hai — thoda sambhal.",
+                "Bhai {name}, {m} bol ke kitna girna hai tujhe? Thoda dignity rakh."
+            ]
+            return random.choice(templates).format(name=name, m=m)
+        templates = [
+            "{name}, ab band kar warna tera sach sach expose kar dunga.",
+            "{name}, tera attitude itna low hai ki log ignore kar rahe hain."
+        ]
+        return random.choice(templates).format(name=name)
+    else:
+        return random.choice(SAFE_ROASTS).format(name=name)
+# -------------------- main.py (PART 5/8) --------------------
+# human-like roast sets (for extra customization)
+HUMAN_SOFT_ROASTS = [
+    "{name}, bhai thoda shaant ho ja — tera drama unnecessary hai.",
+    "Oye {name}, bolne se pehle soch le, warna log hans ke kahenge 'arre yeh kya bol raha'.",
+    "{name}, tera logic thoda weak lag raha hai — ek baar dimag on kar le.",
+]
 
+HUMAN_STRONG_ROASTS = [
+    "{name}, tune jo bola usse lagta hai tumne life me thoda kam dekha hai.",
+    "Bhai {name}, seriously — aise bol ke apni izzat mat gira.",
+    "{name}, tera attitude itna cheap hai ki log seedha turn off kar dete hain.",
+]
+
+HUMAN_EXTRA_STRONG = [
+    "{name}, tu itna bakwaas hai ki tujhe log free ka example samajh ke dikhate hain.",
+    "{name}, sun le — aise bolta raha to sab tere upar hasenge, respect khatam."
+]
+
+def choose_human_roast(display_name: str, level: str = "soft", matched_word: str = None) -> str:
+    name = display_name or "bhai"
+    if level == "extra":
+        tmpl = random.choice(HUMAN_EXTRA_STRONG)
+    elif level == "strong":
+        tmpl = random.choice(HUMAN_STRONG_ROASTS)
+    else:
+        tmpl = random.choice(HUMAN_SOFT_ROASTS)
+    if matched_word:
+        m = matched_word.strip()
+        if len(m) > 2:
+            masked = m[0] + ("*" * (len(m)-2)) + m[-1]
+        else:
+            masked = m[0] + "*"
+        return f"{tmpl.format(name=name)} (log bol rahe: '{masked}')"
+    return tmpl.format(name=name)
+
+# -------------------- SEND LONG MESSAGE (chunked) --------------------
 async def send_long_message(channel: discord.abc.Messageable, text: str):
     if not text:
         await channel.send("Papa ji, reply thoda khali sa aa gaya, dobara try karo.")
@@ -167,7 +236,10 @@ async def send_long_message(channel: discord.abc.Messageable, text: str):
     for i in range(0, len(text), max_len):
         await channel.send(text[i:i+max_len])
         await asyncio.sleep(0.06)
-# ---------- PART 4: Live-search helpers + prompt builder ----------
+# -------------------- main.py (PART 6/8) --------------------
+# -------------------- LIVE SEARCH HELPERS (SERPAPI / GOOGLE CSE) --------------------
+import requests
+
 def perform_search_serpapi(query: str, num: int = 3) -> str:
     if not SERPAPI_KEY:
         return ""
@@ -200,7 +272,6 @@ def perform_search_google(query: str, num: int = 3) -> str:
         return ""
 
 def perform_live_search(query: str) -> str:
-    # prefer serpapi
     if SERPAPI_KEY:
         s = perform_search_serpapi(query)
         if s:
@@ -210,38 +281,13 @@ def perform_live_search(query: str) -> str:
         if s:
             return s
     return ""
-
-def build_normal_prompt(user_name: str, user_text: str, owner_flag: bool, lang: str) -> str:
-    title = "Papa ji" if owner_flag else user_name
-    mode = RUNTIME_SETTINGS.get("mode", "funny")
-    tone = {
-        "funny":"masti + light roast",
-        "angry":"short + savage",
-        "serious":"calm + informative",
-        "flirty":"playful",
-        "sarcastic":"sarcastic",
-        "bhaukaal":"mafia-tone",
-        "coder":"technical"
-    }.get(mode, "masti + light roast")
-    if lang == "hi":
-        lang_preamble = "Reply in Hinglish (Hindi+English). Tone: " + tone
-    else:
-        lang_preamble = "Reply in English. Tone: " + tone
-    prompt = f"""{lang_preamble}
-User: {user_text}
-Answer concisely (2-6 lines). If additional info from web provided, use it.
-
-"""
-    return prompt
-# ---------- PART 5: Hybrid ask_pappu (Gemini + live-search) ----------
+# -------------------- main.py (PART 7/8) --------------------
+# -------------------- HYBRID LLM ASK (Gemini primary, fallback to canned) --------------------
 async def ask_pappu(user: discord.abc.User, text: str, is_announcement: bool, channel: discord.abc.Messageable):
-    owner_flag = is_owner(user)
+    owner_flag = (user.id == OWNER_ID)
     name = "Papa ji" if owner_flag else user.display_name
+    lang = "en" if RUNTIME_SETTINGS.get("english_lock", False) else "hi"
 
-    # strict language choice per owner's english_lock setting
-    lang = choose_language_for_reply(text)  # 'en' or 'hi'
-
-    # quick follow-up resolution using short context
     ctx = get_context(user.id)
     short_followups = ["naam","name","bta","bata","kaun","kis","kis ka"]
     if ctx and len(text.split()) <= 5 and any(w in text.lower() for w in short_followups):
@@ -251,7 +297,6 @@ async def ask_pappu(user: discord.abc.User, text: str, is_announcement: bool, ch
         else:
             text = f"{ctx.get('last_query')} — follow-up: {text}"
 
-    # determine if user likely wants live info
     triggers = ["search","kab","aaj","news","release","lyrics","khabar","price","brand","date","kab aayega"]
     wants_live = any(t in (text or "").lower() for t in triggers)
 
@@ -259,27 +304,23 @@ async def ask_pappu(user: discord.abc.User, text: str, is_announcement: bool, ch
     if wants_live:
         search_summary = perform_live_search(text)
         if not search_summary:
-            # if user explicitly asked live info and keys missing, tell them
             await send_long_message(channel, "Papa ji, live-search keys/config missing ya result nahi mila.")
             return
 
-    # If Gemini model present, prefer it
     if model is not None:
         prompt = build_normal_prompt(user.display_name, text, owner_flag, lang)
         if search_summary:
             prompt += f"\nSearch results:\n{search_summary}\n\nUse these to answer accurately.\n"
-        # If announcement, slightly change instruction
         if is_announcement:
             prompt = ("Write a Discord announcement in " + ("Hinglish." if lang=="hi" else "English.") +
                       " Provide bold title line and 3-6 bullets.\n\n") + prompt
-
         try:
             async with channel.typing():
                 resp = model.generate_content(prompt)
                 out = getattr(resp, "text", None)
                 if not out:
                     out = search_summary or "Papa ji, thoda blank sa aa gaya. Dobara bhejo."
-                # save context items if extractable
+                # save small items to context
                 items = []
                 for line in out.splitlines():
                     l = line.strip()
@@ -288,19 +329,16 @@ async def ask_pappu(user: discord.abc.User, text: str, is_announcement: bool, ch
                     if len(items) >= 8:
                         break
                 if items:
-                    set_context(user.id, extract_subject_from_text(text) if 'extract_subject_from_text' in globals() else "general", text, items=items)
+                    set_context(user.id, "general", text, items=items)
                 await send_long_message(channel, out)
                 return
         except Exception as e:
-            # Gemini error => fallback to simple reply
             await channel.send(f"Gemini error/timeout: {e}. Falling back to simple reply.")
 
-    # If no model or Gemini failed:
     if search_summary:
         await send_long_message(channel, f"Live search results:\n\n{search_summary}")
         return
 
-    # Simple fallback reply (canned)
     mode = RUNTIME_SETTINGS.get("mode", "funny")
     if mode == "funny":
         base = f"Haan {name}, bol kya scene hai? 😎\nShort: {text[:200]}"
@@ -313,17 +351,47 @@ async def ask_pappu(user: discord.abc.User, text: str, is_announcement: bool, ch
         reply = f"Hey {name}, (English mode) — {base}"
     else:
         reply = f"{base} (Hinglish mode)"
-    await send_long_message(channel, reply)
-# ---------- PART 6: SECRET ADMIN + OWNER NL ADMIN ----------
+    await send_long_message(channel, reply) 
+# -------------------- main.py (PART 8/8) --------------------
+# -------------------- ADMIN HELPERS: ensure Muted role + overwrites --------------------
+async def ensure_muted_role_and_overwrites(guild: discord.Guild) -> Optional[discord.Role]:
+    muted_role = discord.utils.get(guild.roles, name="Muted")
+    if not muted_role:
+        try:
+            muted_role = await guild.create_role(name="Muted", reason="Created by Pappu for muting")
+        except Exception as e:
+            print("Could not create Muted role:", e)
+            return None
+
+    bot_member = guild.me
+    if not bot_member:
+        return muted_role
+
+    overwrite = discord.PermissionOverwrite()
+    overwrite.send_messages = False
+    overwrite.add_reactions = False
+    overwrite.speak = False
+    overwrite.connect = False
+    overwrite.send_tts_messages = False
+    # apply on text channels
+    for ch in guild.text_channels:
+        try:
+            await ch.set_permissions(muted_role, overwrite=overwrite, reason="Apply mute role restrictions")
+        except Exception:
+            pass
+    return muted_role
+
+# -------------------- OWNER / SECRET ADMIN HANDLER --------------------
 async def handle_secret_admin(message: discord.Message, clean_text: str) -> bool:
-    if not is_owner(message.author):
+    if message.author.id != OWNER_ID:
         return False
 
-    global ALLOW_PROFANITY
+    global PROFANE_KEYWORDS, ROASTS_STRONG
     text = (clean_text or "").lower().strip()
+    guild = message.guild
 
-    # shutdown
-    if text in ("pappu shutdown", "pappu stop", "pappu sleep"):
+    # shutdown / restart
+    if text in ("pappu shutdown","pappu stop","pappu sleep"):
         await message.channel.send("Theek hai Papa ji, going offline. 👋")
         save_persistent_state()
         try:
@@ -332,8 +400,7 @@ async def handle_secret_admin(message: discord.Message, clean_text: str) -> bool
             os._exit(0)
         return True
 
-    # restart
-    if text in ("pappu restart", "pappu reboot"):
+    if text in ("pappu restart","pappu reboot"):
         await message.channel.send("Restarting now, Papa ji... 🔁")
         save_persistent_state()
         try:
@@ -343,7 +410,7 @@ async def handle_secret_admin(message: discord.Message, clean_text: str) -> bool
             await message.channel.send(f"Restart failed: `{e}` — restart from panel.")
         return True
 
-    # owner_dm toggle
+    # owner toggles: owner_dm, english, allow_profanity, auto_retaliate
     if text.startswith("pappu owner_dm"):
         if "on" in text:
             RUNTIME_SETTINGS["owner_dm_only"] = True
@@ -357,210 +424,123 @@ async def handle_secret_admin(message: discord.Message, clean_text: str) -> bool
             await message.channel.send("Use: `pappu owner_dm on` / `pappu owner_dm off`")
         return True
 
-    # stealth
-    if text.startswith("pappu stealth"):
-        if "on" in text:
-            RUNTIME_SETTINGS["stealth"] = True
-            save_persistent_state()
-            await message.channel.send("Stealth ON.")
-            try:
-                await bot.change_presence(status=discord.Status.invisible)
-            except Exception:
-                pass
-        elif "off" in text:
-            RUNTIME_SETTINGS["stealth"] = False
-            save_persistent_state()
-            await message.channel.send("Stealth OFF.")
-            try:
-                await bot.change_presence(status=discord.Status.online)
-            except Exception:
-                pass
-        else:
-            await message.channel.send("Use: `pappu stealth on` / `pappu stealth off`")
-        return True
-
-    # mode
-    if text.startswith("pappu mode"):
-        parts = text.split()
-        if len(parts) >= 3 and apply_mode(parts[2]):
-            await message.channel.send(f"Mode set to `{parts[2]}`.")
-        else:
-            await message.channel.send("Usage: `pappu mode funny|angry|serious|...`")
-        return True
-
-    # english strict toggle (owner)
     if text.startswith("pappu english"):
         if "on" in text:
             RUNTIME_SETTINGS["english_lock"] = True
             save_persistent_state()
-            await message.channel.send("English-Lock ON. Ab sirf English me reply karunga.")
+            await message.channel.send("English-Lock ON.")
         elif "off" in text:
             RUNTIME_SETTINGS["english_lock"] = False
             save_persistent_state()
-            await message.channel.send("English-Lock OFF. Ab sirf Hinglish me reply karunga.")
+            await message.channel.send("English-Lock OFF.")
         else:
             await message.channel.send("Use: `pappu english on` / `pappu english off`")
         return True
 
-    # profanity toggle (owner)
     if "allow_profanity" in text:
         if "on" in text:
             RUNTIME_SETTINGS["allow_profanity"] = True
-            ALLOW_PROFANITY = True
             save_persistent_state()
             await message.channel.send("ALLOW_PROFANITY set to ON (owner-approved).")
         elif "off" in text:
             RUNTIME_SETTINGS["allow_profanity"] = False
-            ALLOW_PROFANITY = False
             save_persistent_state()
             await message.channel.send("ALLOW_PROFANITY set to OFF.")
         else:
             await message.channel.send("Use: `pappu allow_profanity on` / `pappu allow_profanity off`")
         return True
 
-    # Guild-only admin commands
-    guild = message.guild
-    if guild is None:
-        return False
-
-    target_channel = message.channel
-    if message.channel_mentions:
-        target_channel = message.channel_mentions[0]
-
-    target_member = None
-    for m in message.mentions:
-        if m != guild.me:
-            target_member = m
-            break
-
-    # delete last bot message
-    if any(k in text for k in ["delete","del","uda","hata","remove"]) and any(k in text for k in ["last","pichla","pichle"]):
-        async for msg in target_channel.history(limit=50):
-            if msg.author == bot.user:
-                try:
-                    await msg.delete()
-                except Exception:
-                    pass
-                await message.channel.send(f"{target_channel.mention} me last Pappu message delete kar diya.")
-                return True
-        await message.channel.send("Papa ji, last Pappu message nahi mila.")
+    if text.startswith("pappu auto_retaliate"):
+        if "on" in text:
+            RUNTIME_SETTINGS["auto_retaliate"] = True
+            save_persistent_state()
+            await message.channel.send("Auto-retaliate ON (owner-approved).")
+        elif "off" in text:
+            RUNTIME_SETTINGS["auto_retaliate"] = False
+            save_persistent_state()
+            await message.channel.send("Auto-retaliate OFF.")
+        else:
+            await message.channel.send("Use: `pappu auto_retaliate on` / `pappu auto_retaliate off`")
         return True
 
-    # announcement
-    if "announcement" in text or "announce" in text:
-        topic = clean_text
-        for word in ["announcement","announce"]:
-            topic = topic.replace(word,"")
-        for ch in message.channel_mentions:
-            topic = topic.replace(ch.mention,"")
-        topic = topic.strip()
-        if not topic:
-            await message.channel.send("Announcement kis topic par chahiye Papa ji?")
-            return True
-        await ask_pappu(message.author, topic, True, target_channel)
-        return True
-
-    # unmute/mute/kick/ban/unban logic (same as earlier blocks)
-    if "unmute" in text:
-        if not target_member:
-            await message.channel.send("Kisko unmute karna hai @mention karo.")
-            return True
-        muted_role = discord.utils.get(guild.roles, name="Muted")
-        if not muted_role:
-            await message.channel.send("Muted role nahi mila.")
-            return True
-        try:
-            await target_member.remove_roles(muted_role)
-            await message.channel.send(f"{target_member.mention} ka mute hata diya.")
-        except Exception as e:
-            await message.channel.send(f"Error: `{e}`")
-        return True
-
-    if "mute" in text and "unmute" not in text:
-        if not target_member:
-            await message.channel.send("Kisko mute karna hai @mention karo.")
-            return True
-        muted_role = discord.utils.get(guild.roles, name="Muted")
-        if not muted_role:
-            await message.channel.send("Muted role nahi mila.")
-            return True
-        try:
-            await target_member.add_roles(muted_role)
-            await message.channel.send(f"{target_member.mention} ko mute kar diya.")
-        except Exception as e:
-            await message.channel.send(f"Error: `{e}`")
-        return True
-
-    if "kick" in text or "bahar nikal" in text:
-        if not target_member:
-            await message.channel.send("Kisko kick karna hai @mention karo.")
-            return True
-        try:
-            await target_member.kick()
-            await message.channel.send(f"{target_member} ko kick kar diya.")
-        except Exception as e:
-            await message.channel.send(f"Error: `{e}`")
-        return True
-
-    if "ban" in text and "unban" not in text:
-        if not target_member:
-            await message.channel.send("Kisko ban karna hai @mention karo.")
-            return True
-        try:
-            await guild.ban(target_member)
-            await message.channel.send(f"{target_member} ko ban kar diya.")
-        except Exception as e:
-            await message.channel.send(f"Error: `{e}`")
-        return True
-
-    if "unban" in text:
-        parts = clean_text.split()
-        target_spec = None
+    if text.startswith("pappu auto_retaliate_cooldown"):
+        parts = text.split()
         for p in parts:
-            if "#" in p or p.isdigit():
-                target_spec = p
-                break
-        if not target_spec and target_member is None:
-            await message.channel.send("Kisko unban karna hai? user#1234 ya ID batao.")
+            if p.isdigit():
+                RUNTIME_SETTINGS["auto_retaliate_cooldown"] = int(p)
+                save_persistent_state()
+                await message.channel.send(f"Auto-retaliate cooldown set to {p} seconds.")
+                return True
+        await message.channel.send("Usage: `pappu auto_retaliate_cooldown 60`")
+        return True
+
+    # reload slurs
+    if text.startswith("pappu reload_slurs"):
+        PROFANE_KEYWORDS = load_slurs()
+        await message.channel.send(f"Slurs reloaded — {len(PROFANE_KEYWORDS)} keywords loaded.")
+        return True
+
+    # reload strong roasts
+    if text.startswith("pappu reload_roasts"):
+        ROASTS_STRONG = load_strong_roasts()
+        await message.channel.send(f"Strong roast templates reloaded — {len(ROASTS_STRONG)} templates loaded.")
+        return True
+
+    # ensure muted role + overwrites
+    if text.startswith("pappu ensure_muted"):
+        if guild is None:
+            await message.channel.send("This command only works in a server.")
+            return True
+        r = await ensure_muted_role_and_overwrites(guild)
+        if r:
+            await message.channel.send("Muted role ensured + overwrites applied (where possible).")
+        else:
+            await message.channel.send("Could not ensure muted role (permissions issue).")
+        return True
+
+    # owner manual raw insult (explicit) - owner must type exact text or choose index from ROASTS_STRONG
+    # usage examples:
+    #  pappu raw_insult @user <text...>
+    #  pappu raw_insult @user 0    -> uses ROASTS_STRONG[0]
+    if ("raw_insult" in text) or (("gali de" in text) and ("owner" in text or "raw" in text)):
+        if not message.mentions:
+            await message.channel.send("Kisko raw insult bhejna hai? @mention karo aur phir slur/text likho.")
+            return True
+        target = message.mentions[0]
+        rest = clean_text
+        for m in message.mentions:
+            rest = rest.replace(m.mention, "")
+        rest = rest.strip()
+        if rest.isdigit():
+            idx = int(rest)
+            if 0 <= idx < len(ROASTS_STRONG):
+                raw = ROASTS_STRONG[idx]
+            else:
+                await message.channel.send("Invalid index for strong roasts.")
+                return True
+        elif rest:
+            raw = rest  # owner-provided text
+        else:
+            await message.channel.send("Provide raw text or index.")
             return True
         try:
-            bans = await guild.bans()
-            user_obj = None
-            if target_member:
-                user_obj = target_member
-            else:
-                for ban_entry in bans:
-                    user = ban_entry.user
-                    if target_spec.isdigit() and int(target_spec) == user.id:
-                        user_obj = user
-                        break
-                    if target_spec.lower() == f"{user.name}#{user.discriminator}".lower():
-                        user_obj = user
-                        break
-            if not user_obj:
-                await message.channel.send("Ban list me user nahi mila.")
-                return True
-            await guild.unban(user_obj)
-            await message.channel.send(f"{user_obj} ko unban kar diya.")
+            await message.channel.send(raw)
         except Exception as e:
-            await message.channel.send(f"Error: `{e}`")
+            await message.channel.send(f"Error sending raw insult: `{e}`")
         return True
 
-    # owner-requested insult
-    if is_owner(message.author) and ("gali de" in text or "insult" in text or "gali bhej" in text):
-        if not target_member:
-            await message.channel.send("Kisko insult bhejna hai @mention karo.")
-            return True
-        prof = RUNTIME_SETTINGS.get("allow_profanity", False)
-        roast = choose_roast(target_member.display_name, profane=prof)
-        await message.channel.send(roast)
-        return True
-
+    # If none matched
     return False
-# ---------- PART 7: Events + commands (on_message includes auto-retaliation) ----------
+
+# -------------------- EVENTS + on_message (auto-retaliation + main flow) --------------------
 @bot.event
 async def on_ready():
     print(f"✅ {bot.user} online hai Papa ji!")
+    # sync slash commands for this bot (owner only if needed)
+    try:
+        await tree.sync()
+    except Exception:
+        pass
     try:
         if RUNTIME_SETTINGS.get("stealth"):
             await bot.change_presence(status=discord.Status.invisible)
@@ -568,70 +548,3 @@ async def on_ready():
             await bot.change_presence(status=discord.Status.online)
     except Exception:
         pass
-
-@bot.event
-async def on_message(message: discord.Message):
-    if message.author.bot:
-        return
-
-    content = message.content or ""
-    content_lower = content.lower()
-
-    # owner_dm_only enforcement
-    if RUNTIME_SETTINGS.get("owner_dm_only", False) and not is_owner(message.author):
-        return
-
-    invoked = bot.user.mentioned_in(message) or ("pappu" in content_lower)
-
-    if invoked:
-        clean_text = content.replace(f"<@{bot.user.id}>", "").replace(f"<@!{bot.user.id}>", "").strip()
-
-        # Owner secret admin try first
-        if is_owner(message.author):
-            handled_secret = await handle_secret_admin(message, clean_text)
-            if handled_secret:
-                await bot.process_commands(message)
-                return
-
-        # ---------- AUTO-RETALIATE ON INSULTS ----------
-        lowered = clean_text.lower()
-        if any(k in lowered for k in PROFANE_KEYWORDS):
-            if RUNTIME_SETTINGS.get("allow_profanity", False):
-                roast = choose_roast(message.author.display_name, profane=True)
-                await message.channel.send(roast)
-                return
-            else:
-                await message.channel.send("Papa ji, shishtachar rakho. Aise mat bolo.")
-                return
-
-        # Normal chat
-        if not clean_text or clean_text.lower() in ["pappu", "pappu?", "pappu!", "pappu bot"]:
-            name = "Papa ji" if is_owner(message.author) else message.author.name
-            await message.channel.send(f"Haan {name}, bol kya scene hai? 😎")
-        else:
-            await ask_pappu(message.author, clean_text, False, message.channel)
-
-    await bot.process_commands(message)
-
-# Simple commands
-@bot.command(name="hello")
-async def hello_cmd(ctx):
-    name = "Papa ji" if is_owner(ctx.author) else ctx.author.name
-    await ctx.send(f"Namaste {name}! 🙏 Main Pappu Programmer hu.")
-
-@bot.command(name="ask")
-async def ask_cmd(ctx, *, question: str):
-    await ask_pappu(ctx.author, question, False, ctx.channel)
-# ---------- PART 8: Run + alias + final save ----------
-# compatibility alias so older callsites keep working
-handle_owner_nl_admin = handle_secret_admin
-
-if __name__ == "__main__":
-    # ensure persisted values loaded (already loaded at import)
-    if not DISCORD_TOKEN:
-        print("❌ DISCORD_TOKEN missing in .env")
-        sys.exit(1)
-    try:
-        bot.run(DISCORD_TOKEN)
-    finally:
-        save_persistent_state()
