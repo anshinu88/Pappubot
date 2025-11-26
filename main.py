@@ -503,6 +503,8 @@ async def ask_pappu(user: discord.abc.User, text: str, is_announcement: bool, ch
 async def handle_secret_admin(message: discord.Message, clean_text: str) -> bool:
     if not is_owner(message.author):
         return False
+# compatibility alias so old callsites (handle_owner_nl_admin) keep working
+handle_owner_nl_admin = handle_secret_admin
     text = clean_text.lower().strip()
 
     if text in ("pappu shutdown","pappu stop","pappu sleep"):
