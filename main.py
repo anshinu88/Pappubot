@@ -340,7 +340,7 @@ def perform_live_search(query: str) -> str:
         if s:
             return s
     return ""
-# -------------------- main.py (PART 7/8) --------------------
+# -------------------- PART 7: SECRET ADMIN + OWNER NL ADMIN --------------------
 # -------------------- HYBRID LLM ASK (Gemini primary, fallback to canned) --------------------
 async def ask_pappu(user: discord.abc.User, text: str, is_announcement: bool, channel: discord.abc.Messageable):
     owner_flag = (user.id == OWNER_ID)
@@ -411,6 +411,158 @@ async def ask_pappu(user: discord.abc.User, text: str, is_announcement: bool, ch
     else:
         reply = f"{base} (Hinglish mode)"
     await send_long_message(channel, reply)
+
+
+# -------------------- OWNER / SECRET ADMIN HANDLER --------------------
+async def handle_secret_admin(message: discord.Message, clean_text: str) -> bool:
+    if message.author.id != OWNER_ID:
+        return False
+
+    global PROFANE_KEYWORDS, ROASTS_STRONG
+    text = (clean_text or "").lower().strip()
+    guild = message.guild
+
+    # shutdown / restart
+    if text in ("pappu shutdown","pappu stop","pappu sleep"):
+        await message.channel.send("Theek hai Papa ji, going offline. 👋")
+        save_persistent_state()
+        try:
+            await bot.close()
+        except Exception:
+            os._exit(0)
+        return True
+
+    if text in ("pappu restart","pappu reboot"):
+        await message.channel.send("Restarting now, Papa ji... 🔁")
+        save_persistent_state()
+        try:
+            python = sys.executable
+            os.execv(python, [python] + sys.argv)
+        except Exception as e:
+            await message.channel.send(f"Restart failed: `{e}` — restart from panel.")
+        return True
+
+    # owner toggles: owner_dm, english, allow_profanity, auto_retaliate
+    if text.startswith("pappu owner_dm"):
+        if "on" in text:
+            RUNTIME_SETTINGS["owner_dm_only"] = True
+            save_persistent_state()
+            await message.channel.send("Owner DM only mode ON.")
+        elif "off" in text:
+            RUNTIME_SETTINGS["owner_dm_only"] = False
+            save_persistent_state()
+            await message.channel.send("Owner DM only mode OFF.")
+        else:
+            await message.channel.send("Use: `pappu owner_dm on` / `pappu owner_dm off`")
+        return True
+
+    if text.startswith("pappu english"):
+        if "on" in text:
+            RUNTIME_SETTINGS["english_lock"] = True
+            save_persistent_state()
+            await message.channel.send("English-Lock ON.")
+        elif "off" in text:
+            RUNTIME_SETTINGS["english_lock"] = False
+            save_persistent_state()
+            await message.channel.send("English-Lock OFF.")
+        else:
+            await message.channel.send("Use: `pappu english on` / `pappu english off`")
+        return True
+
+    if "allow_profanity" in text:
+        if "on" in text:
+            RUNTIME_SETTINGS["allow_profanity"] = True
+            save_persistent_state()
+            await message.channel.send("ALLOW_PROFANITY set to ON (owner-approved).")
+        elif "off" in text:
+            RUNTIME_SETTINGS["allow_profanity"] = False
+            save_persistent_state()
+            await message.channel.send("ALLOW_PROFANITY set to OFF.")
+        else:
+            await message.channel.send("Use: `pappu allow_profanity on` / `pappu allow_profanity off`")
+        return True
+
+    if text.startswith("pappu auto_retaliate"):
+        if "on" in text:
+            RUNTIME_SETTINGS["auto_retaliate"] = True
+            save_persistent_state()
+            await message.channel.send("Auto-retaliate ON (owner-approved).")
+        elif "off" in text:
+            RUNTIME_SETTINGS["auto_retaliate"] = False
+            save_persistent_state()
+            await message.channel.send("Auto-retaliate OFF.")
+        else:
+            await message.channel.send("Use: `pappu auto_retaliate on` / `pappu auto_retaliate off`")
+        return True
+
+    if text.startswith("pappu auto_retaliate_cooldown"):
+        parts = text.split()
+        for p in parts:
+            if p.isdigit():
+                RUNTIME_SETTINGS["auto_retaliate_cooldown"] = int(p)
+                save_persistent_state()
+                await message.channel.send(f"Auto-retaliate cooldown set to {p} seconds.")
+                return True
+        await message.channel.send("Usage: `pappu auto_retaliate_cooldown 60`")
+        return True
+
+    # reload slurs
+    if text.startswith("pappu reload_slurs"):
+        PROFANE_KEYWORDS = load_slurs()
+        await message.channel.send(f"Slurs reloaded — {len(PROFANE_KEYWORDS)} keywords loaded.")
+        return True
+
+    # reload strong roasts
+    if text.startswith("pappu reload_roasts"):
+        ROASTS_STRONG = load_strong_roasts()
+        await message.channel.send(f"Strong roast templates reloaded — {len(ROASTS_STRONG)} templates loaded.")
+        return True
+
+    # ensure muted role + overwrites
+    if text.startswith("pappu ensure_muted"):
+        if guild is None:
+            await message.channel.send("This command only works in a server.")
+            return True
+        r = await ensure_muted_role_and_overwrites(guild)
+        if r:
+            await message.channel.send("Muted role ensured + overwrites applied (where possible).")
+        else:
+            await message.channel.send("Could not ensure muted role (permissions issue).")
+        return True
+
+    # owner manual raw insult (explicit) - owner must type exact text or choose index from ROASTS_STRONG
+    # usage examples:
+    #  pappu raw_insult @user <text...>
+    #  pappu raw_insult @user 0    -> uses ROASTS_STRONG[0]
+    if ("raw_insult" in text) or (("gali de" in text) and ("owner" in text or "raw" in text)):
+        if not message.mentions:
+            await message.channel.send("Kisko raw insult bhejna hai? @mention karo aur phir slur/text likho.")
+            return True
+        target = message.mentions[0]
+        rest = clean_text
+        for m in message.mentions:
+            rest = rest.replace(m.mention, "")
+        rest = rest.strip()
+        if rest.isdigit():
+            idx = int(rest)
+            if 0 <= idx < len(ROASTS_STRONG):
+                raw = ROASTS_STRONG[idx]
+            else:
+                await message.channel.send("Invalid index for strong roasts.")
+                return True
+        elif rest:
+            raw = rest  # owner-provided text
+        else:
+            await message.channel.send("Provide raw text or index.")
+            return True
+        try:
+            await message.channel.send(raw)
+        except Exception as e:
+            await message.channel.send(f"Error sending raw insult: `{e}`")
+        return True
+
+    # If none matched
+    return False
 
 # compatibility alias so old callsites keep working
 handle_owner_nl_admin = handle_secret_admin
