@@ -96,6 +96,9 @@ if GEMINI_API_KEY and genai is not None:
 # -------------------- CONTEXT MEMORY (in-memory + persisted) --------------------
 CONTEXT_MEMORY: Dict[int, Dict[str, Any]] = {}
 MEMORY_TTL = 60 * 60 * 6  # 6 hours TTL for simple memory
+
+# per-user last retaliate timestamp (throttle)
+LAST_RETALIATE: Dict[int, int] = {}
 # -------------------- main.py (PART 3/8) --------------------
 def _now_ts() -> int:
     return int(time.time())
@@ -151,16 +154,24 @@ ROASTS_STRONG = load_strong_roasts()
 # background periodic reload (optional)
 @tasks.loop(minutes=5.0)
 async def periodic_reload_slurs():
+    """
+    Reloads the slurs list from disk periodically.
+    NOTE: Do NOT start this at module import time. We'll start it in on_ready().
+    """
     global PROFANE_KEYWORDS
-    PROFANE_KEYWORDS = load_slurs()
+    try:
+        PROFANE_KEYWORDS = load_slurs()
+        # optional debug log
+        # print(f"🔁 periodic_reload_slurs: loaded {len(PROFANE_KEYWORDS)} keywords")
+    except Exception as e:
+        print("Error in periodic_reload_slurs:", e)
 
 @periodic_reload_slurs.before_loop
 async def before_reload():
+    # ensure bot is ready before first run
     await bot.wait_until_ready()
 
-periodic_reload_slurs.start()
-
-# -------------------- ROASTS, MASKING, HELPERS --------------------
+# ---- helper: mask & roast helpers ----
 SAFE_ROASTS = [
     "{name}, tera logic dekh ke mere debugger ko chhutti leni padi. 😂",
     "{name}, thoda sambhal ke bol — tumhara drama unnecessary hai.",
@@ -191,6 +202,54 @@ def choose_roast(display_name: str, profane: bool = False, matched_slur: str = N
         return random.choice(templates).format(name=name)
     else:
         return random.choice(SAFE_ROASTS).format(name=name)
+
+# safe masked auto-retaliate helper (throttled)
+async def maybe_auto_retaliate(message: discord.Message, clean_text: str) -> bool:
+    """
+    Returns True if bot handled retaliation (so caller can return).
+    This function uses PROFANE_KEYWORDS loaded from slurs.txt.
+    It masks the matched keyword and uses human-style roast templates.
+    """
+    if not RUNTIME_SETTINGS.get("auto_retaliate", False):
+        return False
+    if message.author.bot:
+        return False
+    uid = message.author.id
+    now_ts = int(time.time())
+    cooldown = int(RUNTIME_SETTINGS.get("auto_retaliate_cooldown", 60))
+    last = LAST_RETALIATE.get(uid, 0)
+    if now_ts - last < cooldown:
+        return False
+
+    lowered = (clean_text or "").lower()
+    matched = None
+    for kw in PROFANE_KEYWORDS:
+        if kw and kw in lowered:
+            matched = kw
+            break
+    if not matched:
+        return False
+
+    # prepare masked, human-like roast
+    roast = choose_roast(message.author.display_name or message.author.name, profane=True, matched_slur=matched)
+    try:
+        await message.channel.send(roast)
+        LAST_RETALIATE[uid] = now_ts
+        # audit/owner notify (best-effort)
+        try:
+            if LOG_CHANNEL_ID:
+                log_ch = bot.get_channel(LOG_CHANNEL_ID)
+                if log_ch:
+                    await log_ch.send(f"[Auto-retaliate] {message.author} used '{matched}' in {message.guild}/{message.channel}.")
+            owner = bot.get_user(OWNER_ID)
+            if owner:
+                await owner.send(f"[Auto-retaliate] {message.author} used '{matched}' in {message.guild}/{message.channel}.")
+        except Exception:
+            pass
+        return True
+    except Exception as e:
+        print("maybe_auto_retaliate send error:", e)
+        return False
 # -------------------- main.py (PART 5/8) --------------------
 # human-like roast sets (for extra customization)
 HUMAN_SOFT_ROASTS = [
@@ -351,7 +410,10 @@ async def ask_pappu(user: discord.abc.User, text: str, is_announcement: bool, ch
         reply = f"Hey {name}, (English mode) — {base}"
     else:
         reply = f"{base} (Hinglish mode)"
-    await send_long_message(channel, reply) 
+    await send_long_message(channel, reply)
+
+# compatibility alias so old callsites keep working
+handle_owner_nl_admin = handle_secret_admin
 # -------------------- main.py (PART 8/8) --------------------
 # -------------------- ADMIN HELPERS: ensure Muted role + overwrites --------------------
 async def ensure_muted_role_and_overwrites(guild: discord.Guild) -> Optional[discord.Role]:
@@ -548,3 +610,11 @@ async def on_ready():
             await bot.change_presence(status=discord.Status.online)
     except Exception:
         pass
+
+    # start background task safely (fixes "no running event loop" crash)
+    try:
+        if not periodic_reload_slurs.is_running():
+            periodic_reload_slurs.start()
+            print("🔁 periodic_reload_slurs started")
+    except Exception as e:
+        print("Warning: could not start periodic_reload_slurs:", e)
