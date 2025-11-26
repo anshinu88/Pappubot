@@ -123,7 +123,7 @@ Knowledge:
 - Explain general topics. Live web search only if SEARCH_PROVIDER configured.
 - Always answer only the latest message; prefer short direct replies.
 """
-# ---------- PART 3: ROASTS, PROFANITY MARKERS, LANGUAGE HELPER ----------
+# ---------- PART 3: ROASTS, PROFANITY MARKERS, LANGUAGE HELPER + send_long_message ----------
 SAFE_ROAST_POOL = [
     "Arre {name}, thoda soft reh — tera logic abhi beta mode me hai. 😏",
     "{name}, tera swag strong hai par andar se 404 common sense mil raha hai. 😂",
@@ -217,6 +217,22 @@ def choose_roast(target_name: str, profane: bool = False) -> str:
     if profane and (ALLOW_PROFANITY or RUNTIME_SETTINGS.get("allow_profanity", False)):
         return random.choice(PROFANE_ROAST_POOL).format(name=target_name)
     return random.choice(SAFE_ROAST_POOL).format(name=target_name)
+
+# Helper to send long text in chunks
+async def send_long_message(channel: discord.TextChannel, text: str):
+    """Discord ke 2000-char limit ko handle karta hai — agar lamba text hua toh chunks me bhejega."""
+    if not text:
+        await channel.send("Papa ji, reply thoda khali sa aa gaya, dubara try karein? 😅")
+        return
+
+    max_len = 1900  # safe limit
+    if len(text) <= max_len:
+        await channel.send(text)
+    else:
+        for i in range(0, len(text), max_len):
+            chunk = text[i:i + max_len]
+            await channel.send(chunk)
+            await asyncio.sleep(0.15)
 # ---------- PART 4: LIVE SEARCH HELPERS + PROMPT BUILDERS ----------
 def perform_search_serpapi(query: str, num: int = 3) -> str:
     key = SERPAPI_KEY
@@ -549,7 +565,7 @@ async def handle_secret_admin(message: discord.Message, clean_text: str) -> bool
             await message.channel.send("Stealth ON. Now invisible. 👻")
             try:
                 await bot.change_presence(status=discord.Status.invisible)
-            except:
+            except Exception:
                 pass
         elif "off" in text:
             RUNTIME_SETTINGS["stealth"] = False
@@ -557,7 +573,7 @@ async def handle_secret_admin(message: discord.Message, clean_text: str) -> bool
             await message.channel.send("Stealth OFF. Back online.")
             try:
                 await bot.change_presence(status=discord.Status.online)
-            except:
+            except Exception:
                 pass
         else:
             await message.channel.send("Use: `pappu stealth on` / `pappu stealth off`")
@@ -588,8 +604,6 @@ async def handle_secret_admin(message: discord.Message, clean_text: str) -> bool
         return True
 
     # ========== OWNER NL ADMIN ==========
-
-    text = clean_text.lower()
     guild = message.guild
     if guild is None:
         return False
@@ -608,7 +622,10 @@ async def handle_secret_admin(message: discord.Message, clean_text: str) -> bool
     if any(k in text for k in ["delete", "del", "uda", "hata", "remove"]) and any(k in text for k in ["last", "pichla", "pichle"]):
         async for msg in target_channel.history(limit=50):
             if msg.author == bot.user:
-                await msg.delete()
+                try:
+                    await msg.delete()
+                except Exception:
+                    pass
                 await message.channel.send(f"{target_channel.mention} me last Pappu message delete kar diya.")
                 return True
         await message.channel.send("Papa ji, last Pappu message nahi mila.")
@@ -722,7 +739,7 @@ async def handle_secret_admin(message: discord.Message, clean_text: str) -> bool
             await message.channel.send(f"Error: `{e}`")
         return True
 
-    # ---------- OWNER INSULT / GAALI ----------
+    # ---------- OWNER-REQUESTED INSULT ----------
     if is_owner(message.author) and ("gali de" in text or "insult" in text or "gali bhej" in text):
         if not target_member:
             await message.channel.send("Kisko insult bhejna hai @mention karo.")
@@ -749,7 +766,6 @@ async def handle_secret_admin(message: discord.Message, clean_text: str) -> bool
         return True
 
     return False
-
 
 # compatibility alias so old callsites keep working
 handle_owner_nl_admin = handle_secret_admin
