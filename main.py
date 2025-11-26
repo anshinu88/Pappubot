@@ -46,7 +46,8 @@ RUNTIME_SETTINGS = {
     "owner_dm_only": False,
     "stealth": False,
     "mode": "funny",  # default mode
-    "allow_profanity": ALLOW_PROFANITY
+    "allow_profanity": ALLOW_PROFANITY,
+    "english_lock": False  # if True => bot ALWAYS replies in English
 }
 
 def load_persistent_state():
@@ -93,40 +94,6 @@ def apply_mode(mode: str):
 
 # load saved settings/memory
 load_persistent_state()
-# ---------- MISSING HELPERS: send_long_message + periodic_autosave ----------
-async def send_long_message(channel: discord.TextChannel, text: str):
-    """Send long text safely (Discord ~2000 char limit)."""
-    if not text:
-        try:
-            await channel.send("Papa ji, reply khali aa gaya, dobara bhejo. 😅")
-        except Exception:
-            pass
-        return
-    max_len = 1900
-    try:
-        if len(text) <= max_len:
-            await channel.send(text)
-        else:
-            for i in range(0, len(text), max_len):
-                chunk = text[i:i + max_len]
-                await channel.send(chunk)
-    except Exception:
-        # fallback: try smaller chunks if big embed or other error
-        try:
-            for i in range(0, len(text), 1000):
-                await channel.send(text[i:i+1000])
-        except Exception:
-            pass
-
-async def periodic_autosave(interval_seconds: int = 300):
-    """Background task: periodically save persistent state to disk."""
-    while True:
-        try:
-            await asyncio.sleep(interval_seconds)
-            save_persistent_state()
-        except Exception:
-            # swallow errors so task doesn't die
-            await asyncio.sleep(interval_seconds)
 # ---------- PART 2: GEMINI CONFIG + DISCORD BOT INIT + PERSONALITY ----------
 # Gemini config (if provided)
 if GEMINI_API_KEY:
@@ -149,7 +116,12 @@ Language & Style:
 - Reply in Hinglish (Hindi + English mix) by default.
 - Tone: friendly, witty. OWNER-only modes may allow stronger profanity.
 - Avoid hateful slurs targeting protected groups.
-- If user is OWNER, call them "Papa ji".
+- If the user is the owner, call them "Papa ji".
+- Default: short / medium replies (2–4 lines). Use longer only on explicit requests.
+
+Knowledge:
+- Explain general topics. Live web search only if SEARCH_PROVIDER configured.
+- Always answer only the latest message; prefer short direct replies.
 """
 # ---------- PART 3: ROASTS, PROFANITY MARKERS, LANGUAGE HELPER ----------
 SAFE_ROAST_POOL = [
@@ -172,14 +144,33 @@ PROFANITY_MARKERS = [
 ]
 
 def is_english(text: str) -> bool:
+    """
+    Much stricter detection so bot doesn't get stuck in English mode.
+    Only returns True if user CLEARLY writes in English sentences.
+    """
     if not text:
         return False
+
+    text = text.strip()
+
+    # If contains Devanagari (Hindi) characters → definitely NOT English
+    if re.search(r"[\u0900-\u097F]", text):
+        return False
+
+    # find alphabetic tokens
     words = re.findall(r"[A-Za-z']+", text)
     if not words:
         return False
-    ascii_ratio = sum(1 for w in words if re.match(r"^[A-Za-z']+$", w)) / len(words)
-    common_en = sum(1 for w in words if w.lower() in {"the","is","are","you","what","when","how","where","i","we","me","please"})
-    return ascii_ratio > 0.6 or common_en >= 1
+
+    # require at least two reasonably long English words (to avoid small mixed messages)
+    long_words = [w for w in words if len(w) >= 4]
+    if len(long_words) < 2:
+        return False
+
+    # ascii ratio heuristic over tokens vs total tokens
+    ascii_ratio = len(words) / max(len(text.split()), 1)
+
+    return ascii_ratio >= 0.70
 
 def clean_now():
     return int(time.time())
@@ -302,7 +293,12 @@ def build_normal_prompt(user_name: str, user_text: str, owner_flag: bool, search
         "dark": "mysterious, philosophical"
     }
     tone_instruction = tone_map.get(mode, "masti + light roast")
-    lang_hint = "Reply in English." if is_english(user_text) else "Reply in Hinglish (Hindi+English)."
+
+    # language hint: respect english_lock if set, otherwise auto-detect
+    if RUNTIME_SETTINGS.get("english_lock"):
+        lang_hint = "Reply ONLY in English."
+    else:
+        lang_hint = "Reply in English." if is_english(user_text) else "Reply in Hinglish (Hindi+English)."
 
     prompt = f"""{PERSONALITY}
 Mode: {mode} — Tone: {tone_instruction}
@@ -334,7 +330,7 @@ Write an announcement in Hinglish with:
 - 3–6 short bullet points
 - Friendly but clear tone
 - 2–3 emojis max
-- Overall length under 1800 chars.
+- Overall length under 1800 characters.
 
 Return ONLY the announcement text that can be directly pasted into Discord.
 """
@@ -568,14 +564,25 @@ async def handle_secret_admin(message: discord.Message, clean_text: str) -> bool
             await message.channel.send("Usage: `pappu mode funny|angry|serious|flirty|sarcastic|bhaukaal|kid|toxic|coder|bhai-ji|dark`")
         return True
 
-    return False
+    # English lock toggle (owner-only)
+    if text.startswith("pappu english"):
+        if "on" in text:
+            RUNTIME_SETTINGS["english_lock"] = True
+            save_persistent_state()
+            await message.channel.send("English-Lock ON. Ab Pappu sirf English me reply karega. 🇬🇧")
+        elif "off" in text:
+            RUNTIME_SETTINGS["english_lock"] = False
+            save_persistent_state()
+            await message.channel.send("English-Lock OFF. Ab Pappu auto language detect karega. 🔄")
+        else:
+            await message.channel.send("Use: `pappu english on` / `pappu english off`")
+        return True
 
-async def handle_owner_nl_admin(message: discord.Message, clean_text: str) -> bool:
-    global ALLOW_PROFANITY
+    # ---------- OWNER NL ADMIN ----------
     text = clean_text.lower()
     guild = message.guild
     if guild is None:
-        return False
+        return False  # DM admin commands not supported here
 
     target_channel = message.channel
     if message.channel_mentions:
@@ -728,6 +735,11 @@ async def handle_owner_nl_admin(message: discord.Message, clean_text: str) -> bo
 
     return False
 # ---------- PART 8: EVENTS + RUN ----------
+async def periodic_autosave(interval_seconds: int = 300):
+    while True:
+        await asyncio.sleep(interval_seconds)
+        save_persistent_state()
+
 @bot.event
 async def on_ready():
     print(f"✅ {bot.user} online hai Papa ji!")
