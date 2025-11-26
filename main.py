@@ -501,19 +501,24 @@ async def ask_pappu(user: discord.abc.User, text: str, is_announcement: bool, ch
         await channel.send(f"Kuch error aa gaya Papa ji: `{e}`")
 # ---------- PART 7: SECRET ADMIN + OWNER NL ADMIN ----------
 async def handle_secret_admin(message: discord.Message, clean_text: str) -> bool:
+    """
+    Owner-only hidden admin commands + owner natural-language admin.
+    Paste this whole block in place of your old PART-7.
+    """
     if not is_owner(message.author):
         return False
-# compatibility alias so old callsites (handle_owner_nl_admin) keep working
-handle_owner_nl_admin = handle_secret_admin
+
     text = clean_text.lower().strip()
 
-    if text in ("pappu shutdown","pappu stop","pappu sleep"):
+    # Shutdown / Stop
+    if text in ("pappu shutdown", "pappu stop", "pappu sleep"):
         await message.channel.send("Theek hai Papa ji, going offline. 👋")
         save_persistent_state()
         await bot.close()
         return True
 
-    if text in ("pappu restart","pappu reboot"):
+    # Restart (attempt)
+    if text in ("pappu restart", "pappu reboot"):
         await message.channel.send("Restarting now, Papa ji... 🔁")
         save_persistent_state()
         try:
@@ -523,6 +528,7 @@ handle_owner_nl_admin = handle_secret_admin
             await message.channel.send(f"Restart failed: `{e}` — please restart from host panel.")
         return True
 
+    # Owner DM only toggle
     if text.startswith("pappu owner_dm"):
         if "on" in text:
             RUNTIME_SETTINGS["owner_dm_only"] = True
@@ -536,6 +542,7 @@ handle_owner_nl_admin = handle_secret_admin
             await message.channel.send("Use: `pappu owner_dm on` or `pappu owner_dm off`")
         return True
 
+    # Stealth presence toggle
     if text.startswith("pappu stealth"):
         if "on" in text:
             RUNTIME_SETTINGS["stealth"] = True
@@ -557,16 +564,19 @@ handle_owner_nl_admin = handle_secret_admin
             await message.channel.send("Use: `pappu stealth on` or `pappu stealth off`")
         return True
 
+    # Mode apply (funny/serious/etc)
     if text.startswith("pappu mode"):
         parts = text.split()
         if len(parts) >= 3 and apply_mode(parts[2]):
             save_persistent_state()
             await message.channel.send(f"Mode set to `{parts[2]}`. Applied.")
         else:
-            await message.channel.send("Usage: `pappu mode funny|angry|serious|flirty|sarcastic|bhaukaal|kid|toxic|coder|bhai-ji|dark`")
+            await message.channel.send(
+                "Usage: `pappu mode funny|angry|serious|flirty|sarcastic|bhaukaal|kid|toxic|coder|bhai-ji|dark`"
+            )
         return True
 
-    # English lock toggle (owner-only)
+    # English-lock toggle
     if text.startswith("pappu english"):
         if "on" in text:
             RUNTIME_SETTINGS["english_lock"] = True
@@ -580,12 +590,14 @@ handle_owner_nl_admin = handle_secret_admin
             await message.channel.send("Use: `pappu english on` / `pappu english off`")
         return True
 
-    # ---------- OWNER NL ADMIN ----------
-    text = clean_text.lower()
+    # ---------- OWNER NATURAL-LANGUAGE ADMIN ----------
+    # For NL admin commands we need a guild (server). If DM, skip NL admin part.
     guild = message.guild
     if guild is None:
-        return False  # DM admin commands not supported here
+        # still allow owner-only commands that don't need guild (we already handled some above)
+        return False
 
+    # Target channel & member resolution
     target_channel = message.channel
     if message.channel_mentions:
         target_channel = message.channel_mentions[0]
@@ -596,23 +608,27 @@ handle_owner_nl_admin = handle_secret_admin
             target_member = m
             break
 
-    # delete last bot message
-    if any(k in text for k in ["delete","del","uda","hata","remove"]) and any(k in text for k in ["last","pichla","pichle"]):
+    # DELETE last bot message in channel
+    if any(k in text for k in ["delete", "del", "uda", "hata", "remove"]) and any(
+        k in text for k in ["last", "pichla", "pichle"]
+    ):
         async for msg in target_channel.history(limit=50):
             if msg.author == bot.user:
                 await msg.delete()
-                await message.channel.send(f"Theek hai Papa ji, {target_channel.mention} me Pappu ka last message delete kar diya.")
+                await message.channel.send(
+                    f"Theek hai Papa ji, {target_channel.mention} me Pappu ka last message delete kar diya."
+                )
                 return True
         await message.channel.send("Papa ji, last Pappu message nahi mila.")
         return True
 
-    # announcement
+    # ANNOUNCEMENT
     if "announcement" in text or "announce" in text:
         topic = clean_text
-        for word in ["announcement","announce"]:
-            topic = topic.replace(word,"")
+        for word in ["announcement", "announce"]:
+            topic = topic.replace(word, "")
         for ch in message.channel_mentions:
-            topic = topic.replace(ch.mention,"")
+            topic = topic.replace(ch.mention, "")
         topic = topic.strip()
         if not topic:
             await message.channel.send("Kis topic pe announcement chahiye Papa ji?")
@@ -620,7 +636,7 @@ handle_owner_nl_admin = handle_secret_admin
         await ask_pappu(message.author, topic, True, target_channel)
         return True
 
-    # mute/unmute
+    # UNMUTE (natural language)
     if "unmute" in text or ("mute" in text and "remove" in text):
         if not target_member:
             await message.channel.send("Kisko unmute karna hai Papa ji? @mention karo.")
@@ -636,6 +652,7 @@ handle_owner_nl_admin = handle_secret_admin
             await message.channel.send(f"Error: `{e}`")
         return True
 
+    # MUTE
     if "mute" in text and "unmute" not in text:
         if not target_member:
             await message.channel.send("Kisko mute karna hai Papa ji? @mention karo.")
@@ -651,7 +668,7 @@ handle_owner_nl_admin = handle_secret_admin
             await message.channel.send(f"Error: `{e}`")
         return True
 
-    # kick
+    # KICK
     if "kick" in text or "bahar nikal" in text:
         if not target_member:
             await message.channel.send("Kisko kick karna hai Papa ji? @mention karo.")
@@ -663,7 +680,7 @@ handle_owner_nl_admin = handle_secret_admin
             await message.channel.send(f"Error: `{e}`")
         return True
 
-    # ban
+    # BAN
     if "ban" in text and "unban" not in text:
         if not target_member:
             await message.channel.send("Kisko ban karna hai Papa ji? @mention karo.")
@@ -675,11 +692,12 @@ handle_owner_nl_admin = handle_secret_admin
             await message.channel.send(f"Error: `{e}`")
         return True
 
-    # unban
+    # UNBAN
     if "unban" in text:
         parts = clean_text.split()
         target_spec = None
         for p in parts:
+            # accept either numeric id or user#discriminator pattern
             if "#" in p or p.isdigit():
                 target_spec = p
                 break
@@ -709,7 +727,7 @@ handle_owner_nl_admin = handle_secret_admin
             await message.channel.send(f"Error: `{e}`")
         return True
 
-    # owner requested insult
+    # OWNER-REQUESTED INSULT (explicit)
     if is_owner(message.author) and ("gali de" in text or "insult" in text or "gali bhej" in text):
         if not target_member:
             await message.channel.send("Kisko insult bhejna hai Papa ji? @mention karke bolo.")
@@ -719,8 +737,12 @@ handle_owner_nl_admin = handle_secret_admin
         await message.channel.send(roast)
         return True
 
-    # toggle profanity persisted
-    if is_owner(message.author) and ("allow_profanity on" in text or "allow_profanity off" in text or "allow_profanity" in text):
+    # TOGGLE ALLOW_PROFANITY (owner-only)
+    if is_owner(message.author) and (
+        "allow_profanity on" in text or "allow_profanity off" in text or "allow_profanity" in text
+    ):
+        # declare global so assignment modifies module-level variable
+        global ALLOW_PROFANITY
         if "on" in text:
             ALLOW_PROFANITY = True
             RUNTIME_SETTINGS["allow_profanity"] = True
@@ -736,6 +758,10 @@ handle_owner_nl_admin = handle_secret_admin
         return True
 
     return False
+
+
+# Compatibility alias so old callsites still work
+handle_owner_nl_admin = handle_secret_admin
 # ---------- PART 8: EVENTS + RUN ----------
 async def periodic_autosave(interval_seconds: int = 300):
     while True:
