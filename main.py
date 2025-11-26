@@ -501,23 +501,22 @@ async def ask_pappu(user: discord.abc.User, text: str, is_announcement: bool, ch
         await channel.send(f"Kuch error aa gaya Papa ji: `{e}`")
 # ---------- PART 7: SECRET ADMIN + OWNER NL ADMIN ----------
 async def handle_secret_admin(message: discord.Message, clean_text: str) -> bool:
-    """
-    Owner-only hidden admin commands + owner natural-language admin.
-    Paste this whole block in place of your old PART-7.
-    """
     if not is_owner(message.author):
         return False
 
     text = clean_text.lower().strip()
 
-    # Shutdown / Stop
+    # Needed because we modify ALLOW_PROFANITY inside this function
+    global ALLOW_PROFANITY
+
+    # ---------- SHUTDOWN ----------
     if text in ("pappu shutdown", "pappu stop", "pappu sleep"):
         await message.channel.send("Theek hai Papa ji, going offline. 👋")
         save_persistent_state()
         await bot.close()
         return True
 
-    # Restart (attempt)
+    # ---------- RESTART ----------
     if text in ("pappu restart", "pappu reboot"):
         await message.channel.send("Restarting now, Papa ji... 🔁")
         save_persistent_state()
@@ -525,79 +524,76 @@ async def handle_secret_admin(message: discord.Message, clean_text: str) -> bool
             python = sys.executable
             os.execv(python, [python] + sys.argv)
         except Exception as e:
-            await message.channel.send(f"Restart failed: `{e}` — please restart from host panel.")
+            await message.channel.send(f"Restart failed: `{e}` — please restart manually.")
         return True
 
-    # Owner DM only toggle
+    # ---------- OWNER DM ONLY MODE ----------
     if text.startswith("pappu owner_dm"):
         if "on" in text:
             RUNTIME_SETTINGS["owner_dm_only"] = True
             save_persistent_state()
-            await message.channel.send("Owner DM only mode ON. Sirf Papa ji ke DMs reply karunga.")
+            await message.channel.send("Owner DM only mode ON.")
         elif "off" in text:
             RUNTIME_SETTINGS["owner_dm_only"] = False
             save_persistent_state()
-            await message.channel.send("Owner DM only mode OFF. Normal mode.")
+            await message.channel.send("Owner DM only mode OFF.")
         else:
-            await message.channel.send("Use: `pappu owner_dm on` or `pappu owner_dm off`")
+            await message.channel.send("Use: `pappu owner_dm on` / `pappu owner_dm off`")
         return True
 
-    # Stealth presence toggle
+    # ---------- STEALTH MODE ----------
     if text.startswith("pappu stealth"):
         if "on" in text:
             RUNTIME_SETTINGS["stealth"] = True
             save_persistent_state()
-            await message.channel.send("Stealth ON. Trying to hide status (best effort).")
+            await message.channel.send("Stealth ON. Now invisible. 👻")
             try:
                 await bot.change_presence(status=discord.Status.invisible)
-            except Exception:
+            except:
                 pass
         elif "off" in text:
             RUNTIME_SETTINGS["stealth"] = False
             save_persistent_state()
-            await message.channel.send("Stealth OFF. Back to normal status.")
+            await message.channel.send("Stealth OFF. Back online.")
             try:
                 await bot.change_presence(status=discord.Status.online)
-            except Exception:
+            except:
                 pass
         else:
-            await message.channel.send("Use: `pappu stealth on` or `pappu stealth off`")
+            await message.channel.send("Use: `pappu stealth on` / `pappu stealth off`")
         return True
 
-    # Mode apply (funny/serious/etc)
+    # ---------- PERSONALITY MODE ----------
     if text.startswith("pappu mode"):
         parts = text.split()
         if len(parts) >= 3 and apply_mode(parts[2]):
             save_persistent_state()
-            await message.channel.send(f"Mode set to `{parts[2]}`. Applied.")
+            await message.channel.send(f"Mode set to `{parts[2]}`.")
         else:
-            await message.channel.send(
-                "Usage: `pappu mode funny|angry|serious|flirty|sarcastic|bhaukaal|kid|toxic|coder|bhai-ji|dark`"
-            )
+            await message.channel.send("Usage: `pappu mode funny|angry|serious|flirty|sarcastic|bhaukaal|kid|toxic|coder|bhai-ji|dark`")
         return True
 
-    # English-lock toggle
+    # ---------- ENGLISH LOCK ----------
     if text.startswith("pappu english"):
         if "on" in text:
             RUNTIME_SETTINGS["english_lock"] = True
             save_persistent_state()
-            await message.channel.send("English-Lock ON. Ab Pappu sirf English me reply karega. 🇬🇧")
+            await message.channel.send("English-Lock ON. 🇬🇧")
         elif "off" in text:
             RUNTIME_SETTINGS["english_lock"] = False
             save_persistent_state()
-            await message.channel.send("English-Lock OFF. Ab Pappu auto language detect karega. 🔄")
+            await message.channel.send("English-Lock OFF. Auto-language enabled.")
         else:
             await message.channel.send("Use: `pappu english on` / `pappu english off`")
         return True
 
-    # ---------- OWNER NATURAL-LANGUAGE ADMIN ----------
-    # For NL admin commands we need a guild (server). If DM, skip NL admin part.
+    # ========== OWNER NL ADMIN ==========
+
+    text = clean_text.lower()
     guild = message.guild
     if guild is None:
-        # still allow owner-only commands that don't need guild (we already handled some above)
         return False
 
-    # Target channel & member resolution
     target_channel = message.channel
     if message.channel_mentions:
         target_channel = message.channel_mentions[0]
@@ -608,21 +604,17 @@ async def handle_secret_admin(message: discord.Message, clean_text: str) -> bool
             target_member = m
             break
 
-    # DELETE last bot message in channel
-    if any(k in text for k in ["delete", "del", "uda", "hata", "remove"]) and any(
-        k in text for k in ["last", "pichla", "pichle"]
-    ):
+    # ---------- DELETE LAST BOT MESSAGE ----------
+    if any(k in text for k in ["delete", "del", "uda", "hata", "remove"]) and any(k in text for k in ["last", "pichla", "pichle"]):
         async for msg in target_channel.history(limit=50):
             if msg.author == bot.user:
                 await msg.delete()
-                await message.channel.send(
-                    f"Theek hai Papa ji, {target_channel.mention} me Pappu ka last message delete kar diya."
-                )
+                await message.channel.send(f"{target_channel.mention} me last Pappu message delete kar diya.")
                 return True
         await message.channel.send("Papa ji, last Pappu message nahi mila.")
         return True
 
-    # ANNOUNCEMENT
+    # ---------- ANNOUNCEMENT ----------
     if "announcement" in text or "announce" in text:
         topic = clean_text
         for word in ["announcement", "announce"]:
@@ -631,82 +623,83 @@ async def handle_secret_admin(message: discord.Message, clean_text: str) -> bool
             topic = topic.replace(ch.mention, "")
         topic = topic.strip()
         if not topic:
-            await message.channel.send("Kis topic pe announcement chahiye Papa ji?")
+            await message.channel.send("Announcement kis topic par chahiye Papa ji?")
             return True
         await ask_pappu(message.author, topic, True, target_channel)
         return True
 
-    # UNMUTE (natural language)
-    if "unmute" in text or ("mute" in text and "remove" in text):
+    # ---------- UNMUTE ----------
+    if "unmute" in text:
         if not target_member:
-            await message.channel.send("Kisko unmute karna hai Papa ji? @mention karo.")
+            await message.channel.send("Kisko unmute karna hai @mention karo.")
             return True
         muted_role = discord.utils.get(guild.roles, name="Muted")
         if not muted_role:
-            await message.channel.send("Muted role nahi mila, pehle role banao.")
+            await message.channel.send("Muted role nahi mila.")
             return True
         try:
-            await target_member.remove_roles(muted_role, reason="Owner unmute via Pappu")
+            await target_member.remove_roles(muted_role)
             await message.channel.send(f"{target_member.mention} ka mute hata diya.")
         except Exception as e:
             await message.channel.send(f"Error: `{e}`")
         return True
 
-    # MUTE
+    # ---------- MUTE ----------
     if "mute" in text and "unmute" not in text:
         if not target_member:
-            await message.channel.send("Kisko mute karna hai Papa ji? @mention karo.")
+            await message.channel.send("Kisko mute karna hai @mention karo.")
             return True
         muted_role = discord.utils.get(guild.roles, name="Muted")
         if not muted_role:
-            await message.channel.send("Muted role nahi mila, pehle role banao.")
+            await message.channel.send("Muted role nahi mila.")
             return True
         try:
-            await target_member.add_roles(muted_role, reason="Owner mute via Pappu")
+            await target_member.add_roles(muted_role)
             await message.channel.send(f"{target_member.mention} ko mute kar diya.")
         except Exception as e:
             await message.channel.send(f"Error: `{e}`")
         return True
 
-    # KICK
+    # ---------- KICK ----------
     if "kick" in text or "bahar nikal" in text:
         if not target_member:
-            await message.channel.send("Kisko kick karna hai Papa ji? @mention karo.")
+            await message.channel.send("Kisko kick karna hai @mention karo.")
             return True
         try:
-            await target_member.kick(reason="Owner kick via Pappu")
+            await target_member.kick()
             await message.channel.send(f"{target_member} ko kick kar diya.")
         except Exception as e:
             await message.channel.send(f"Error: `{e}`")
         return True
 
-    # BAN
+    # ---------- BAN ----------
     if "ban" in text and "unban" not in text:
         if not target_member:
-            await message.channel.send("Kisko ban karna hai Papa ji? @mention karo.")
+            await message.channel.send("Kisko ban karna hai @mention karo.")
             return True
         try:
-            await guild.ban(target_member, reason="Owner ban via Pappu")
+            await guild.ban(target_member)
             await message.channel.send(f"{target_member} ko ban kar diya.")
         except Exception as e:
             await message.channel.send(f"Error: `{e}`")
         return True
 
-    # UNBAN
+    # ---------- UNBAN ----------
     if "unban" in text:
         parts = clean_text.split()
         target_spec = None
         for p in parts:
-            # accept either numeric id or user#discriminator pattern
             if "#" in p or p.isdigit():
                 target_spec = p
                 break
         if not target_spec and target_member is None:
-            await message.channel.send("Kisko unban karna hai? user#1234 ya id batao.")
+            await message.channel.send("Kisko unban karna hai? user#1234 ya ID batao.")
             return True
+
         try:
             bans = await guild.bans()
             user_obj = None
+
             if target_member:
                 user_obj = target_member
             else:
@@ -718,49 +711,47 @@ async def handle_secret_admin(message: discord.Message, clean_text: str) -> bool
                     if target_spec.lower() == f"{user.name}#{user.discriminator}".lower():
                         user_obj = user
                         break
+
             if not user_obj:
                 await message.channel.send("Ban list me user nahi mila.")
                 return True
-            await guild.unban(user_obj, reason="Owner unban via Pappu")
+
+            await guild.unban(user_obj)
             await message.channel.send(f"{user_obj} ko unban kar diya.")
         except Exception as e:
             await message.channel.send(f"Error: `{e}`")
         return True
 
-    # OWNER-REQUESTED INSULT (explicit)
+    # ---------- OWNER INSULT / GAALI ----------
     if is_owner(message.author) and ("gali de" in text or "insult" in text or "gali bhej" in text):
         if not target_member:
-            await message.channel.send("Kisko insult bhejna hai Papa ji? @mention karke bolo.")
+            await message.channel.send("Kisko insult bhejna hai @mention karo.")
             return True
         profane = RUNTIME_SETTINGS.get("allow_profanity", ALLOW_PROFANITY)
         roast = choose_roast(target_member.display_name, profane=profane)
         await message.channel.send(roast)
         return True
 
-    # TOGGLE ALLOW_PROFANITY (owner-only)
-    if is_owner(message.author) and (
-        "allow_profanity on" in text or "allow_profanity off" in text or "allow_profanity" in text
-    ):
-        # declare global so assignment modifies module-level variable
-        global ALLOW_PROFANITY
+    # ---------- PROFANITY TOGGLE ----------
+    if "allow_profanity" in text:
         if "on" in text:
             ALLOW_PROFANITY = True
             RUNTIME_SETTINGS["allow_profanity"] = True
             save_persistent_state()
-            await message.channel.send("ALLOW_PROFANITY set to ON for this session. (Persisted.)")
+            await message.channel.send("Profanity ON. Ab Pappu full gaali mode me chalega.")
         elif "off" in text:
             ALLOW_PROFANITY = False
             RUNTIME_SETTINGS["allow_profanity"] = False
             save_persistent_state()
-            await message.channel.send("ALLOW_PROFANITY set to OFF for this session.")
+            await message.channel.send("Profanity OFF.")
         else:
-            await message.channel.send("Use: 'pappu allow_profanity on' or 'pappu allow_profanity off'")
+            await message.channel.send("Use: `pappu allow_profanity on/off`")
         return True
 
     return False
 
 
-# Compatibility alias so old callsites still work
+# compatibility alias so old callsites keep working
 handle_owner_nl_admin = handle_secret_admin
 # ---------- PART 8: EVENTS + RUN ----------
 async def periodic_autosave(interval_seconds: int = 300):
