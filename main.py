@@ -212,9 +212,25 @@ SAFE_ROASTS = [
 # RAW BRUTAL roasts (ye TU bhar dega apni gaali se)
 # yahan jitni marzi lines add kar sakta hai, sirf {name} mat hataana
 PROFANE_ROASTS = [
-    "Yahan apni RAW brutal line 1 likh {name} ke liye.",
-    "Yahan apni RAW brutal line 2 likh {name} ke liye.",
-    "Yahan apni RAW brutal line 3 likh {name} ke liye."
+    "{name} chal nikal dalle apne baap ko mat sikha.",
+    "{name} teri maa ki chut kam bol",
+    "{name} kam bol bhosdike.",
+    "{name} tere jese mere jhaant saaf krte hai.",
+    "{name} Nikal be lowde.",
+    "{name} Kahi aur ja k gaand marwa bhosdike."
+    "{name} lowde k baal tu bhi bolega ab.",
+    "{name} Teri maa ki chut bhadwe.",
+    "{name} bhosdike sach mei tu ijjat k layak nhi hai.",
+    "{name} Aandu gaandu nhi bolne lge ab.",
+    "{name} Ja beta ja tera gaand marwane ka tym ho gya hai.",
+    "{name} Aaja mc tatte saaf krde mere.",
+    "{name} Apne Baap ko ese bolega bete ab.",
+    "{name} Har baar gaand marwane mere paas hi q aata hai tu??.",
+    "{name} jhaant k baal chup ho na.",
+    "{name} iske muh mei koi loda deke chup kro."
+    "{name} beta mene muh khola toh yahi chud jaega tu.",
+    "{name} Gaandu hai tu smjha bhosdike.",
+    "{name} lowde k baal Nikal yha se."
 ]
 
 # Profanity detection keywords (customize on-host). Avoid protected-class slurs.
