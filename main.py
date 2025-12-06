@@ -239,7 +239,7 @@ PROFANE_KEYWORDS = [
     "madarchod", "maderchod", "mc",
     "bhosd", "bhosdi", "bhosdike",
     "bc", "bsdk", "gandu", "gaand",
-    "randi", "harami", "launde", "lode"
+    "randi", "harami", "launde", "lode", "Teri maa ki chut", "behan k lode", "mkc"
 ]
 
 # Language strictness: per your request english_lock == True => always English; False => only Hinglish
@@ -421,6 +421,63 @@ Now respond with a simpler, shorter version of your original reply, following th
     txt = original_message.content or ""
     if len(txt) > 400:
         txt = txt[:350] + "..."
+    await send_long_message(channel, txt)
+
+
+# ✅ NEW: Detailed expansion helper
+async def expand_previous_reply(
+    user: discord.abc.User,
+    original_message: discord.Message,
+    instruction_text: str,
+    channel: discord.abc.Messageable
+):
+    """
+    Jab user bole 'thoda detail me samjha' type reply,
+    to Pappu apne hi pichhle reply ko zyada DETAIL me explain kare.
+    """
+    lang = choose_language_for_reply(original_message.content)
+
+    if lang == "hi":
+        intro = (
+            "You are expanding your OWN previous reply for the same user. "
+            "Explain the SAME concept in more DETAIL in clear Hinglish. "
+            "Use around 6–10 short lines, add 1–2 simple real-life examples. "
+            "Avoid extra jokes; focus on understanding."
+        )
+    else:
+        intro = (
+            "You are expanding your OWN previous reply for the same user. "
+            "Explain the SAME concept in more DETAIL in clear English. "
+            "Use around 6–10 short lines, add 1–2 simple real-life examples. "
+            "Avoid extra jokes; focus on understanding."
+        )
+
+    prompt = f"""{intro}
+
+Original reply you sent earlier:
+\"\"\"{original_message.content}\"\"\"
+
+User's new message asking for more detail:
+\"\"\"{instruction_text}\"\"\"
+
+Now respond with a more detailed explanation of your original reply, following the style rules.
+"""
+
+    if model is not None:
+        try:
+            async with channel.typing():
+                resp = model.generate_content(prompt)
+                out = getattr(resp, "text", None)
+                if not out:
+                    out = "Detail me samjhate waqt thoda issue aaya, Papa Ji. Ek baar fir se try kar lo."
+                await send_long_message(channel, out)
+                return
+        except Exception as e:
+            await channel.send(f"Gemini error/timeout while expanding: {e}")
+            return
+
+    # Fallback: original reply hi bhej do (at least kuch toh mile)
+    txt = original_message.content or ""
     await send_long_message(channel, txt)
 
 
@@ -694,8 +751,10 @@ async def handle_secret_admin(message: discord.Message, clean_text: str) -> bool
     if "mute" in text and "unmute" not in text:
         if not target_member:
             # no direct mention => treat as baat-cheet, not command
-            await message.channel.send("Samajh gaya Papa ji, kisi ka mute scene chal raha hai. "
-                                       "Agar mujhe mute karwana ho to @mention ke saath bolo. 🙂")
+            await message.channel.send(
+                "Samajh gaya Papa ji, kisi ka mute scene chal raha hai. "
+                "Agar mujhe mute karwana ho to @mention ke saath bolo. 🙂"
+            )
             return True
         muted_role = discord.utils.get(guild.roles, name="Muted")
         if not muted_role:
@@ -771,7 +830,14 @@ async def handle_secret_admin(message: discord.Message, clean_text: str) -> bool
         return True
 
     # owner-requested insult (ye HI dusro ko roast karega, baaki auto nahi)
-    if is_owner(message.author) and ("gali de" in text or "insult" in text or "gali bhej" in text):
+    if is_owner(message.author) and any(
+        kw in text
+        for kw in [
+            "gali de", "gaali de",
+            "gali do", "gaali do",
+            "gali bhej", "gaali bhej"
+        ]
+    ):
         if not target_member:
             await message.channel.send("Kisko insult bhejna hai @mention karo.")
             return True
@@ -801,6 +867,23 @@ async def on_message(message: discord.Message):
 
     content = message.content or ""
     content_lower = content.lower()
+
+    # ---------- SUPER FOLLOW-UP HANDLER (Detail expansion on reply) ----------
+    if (
+        message.reference
+        and message.reference.resolved
+        and message.reference.resolved.author == bot.user
+    ):
+        detail_keywords = [
+            "detail", "details", "thoda detail", "thodi detail",
+            "zyada detail", "aur detail", "deep me", "deep mein",
+            "in depth", "zyada smjha", "zyada samjha"
+        ]
+        if any(k in content_lower for k in detail_keywords):
+            original = message.reference.resolved
+            await expand_previous_reply(message.author, original, content, message.channel)
+            await bot.process_commands(message)
+            return
 
     # owner_dm_only enforcement
     if RUNTIME_SETTINGS.get("owner_dm_only", False) and not is_owner(message.author):
