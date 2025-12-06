@@ -53,6 +53,7 @@ bot = commands.Bot(command_prefix=PREFIX, intents=INTENTS)
 
 # Persistence file
 PERSIST_FILE = Path("pappu_state.json")
+
 # ---------- PART 2: Runtime settings, persistence, model init, helpers ----------
 RUNTIME_SETTINGS: Dict[str, Any] = {
     "owner_dm_only": False,
@@ -60,7 +61,8 @@ RUNTIME_SETTINGS: Dict[str, Any] = {
     "english_lock": False,     # True => only English replies; False => only Hinglish
     "allow_profanity": False,  # owner toggles this
     "mode": "funny",
-    "memory": {}
+    "memory": {},              # yahi per-user Ultra Memory store hogi
+    "memory_meta": {}          # last_reset vs time
 }
 
 # convenience var (kept in sync)
@@ -84,6 +86,9 @@ def load_persistent_state():
             data = json.loads(PERSIST_FILE.read_text(encoding="utf-8"))
             if isinstance(data, dict):
                 RUNTIME_SETTINGS.update(data)
+                # ensure keys present
+                RUNTIME_SETTINGS.setdefault("memory", {})
+                RUNTIME_SETTINGS.setdefault("memory_meta", {})
                 ALLOW_PROFANITY = RUNTIME_SETTINGS.get("allow_profanity", ALLOW_PROFANITY)
     except Exception as e:
         print("Warning: failed loading persistent state:", e)
@@ -199,6 +204,167 @@ async def resolve_target_user(message: discord.Message) -> discord.abc.User:
 
     # Fallback
     return message.author
+
+
+# ---------- NEW: ULTRA DEEP MEMORY (M3) USING RUNTIME_SETTINGS["memory"] ----------
+
+DEEP_MAX_MESSAGES = 50
+DEEP_MAX_TOPICS = 10
+DEEP_RESET_DAYS = 30  # monthly
+
+
+def _deep_root() -> Dict[str, Any]:
+    mem = RUNTIME_SETTINGS.get("memory")
+    if not isinstance(mem, dict):
+        mem = {}
+        RUNTIME_SETTINGS["memory"] = mem
+    return mem
+
+
+def _deep_meta() -> Dict[str, Any]:
+    meta = RUNTIME_SETTINGS.get("memory_meta")
+    if not isinstance(meta, dict):
+        meta = {}
+        RUNTIME_SETTINGS["memory_meta"] = meta
+    return meta
+
+
+def deep_monthly_reset_if_needed():
+    meta = _deep_meta()
+    now = _now_ts()
+    last = meta.get("last_reset", 0)
+    if not last:
+        meta["last_reset"] = now
+        save_persistent_state()
+        return
+    days = (now - last) // 86400
+    if days >= DEEP_RESET_DAYS:
+        RUNTIME_SETTINGS["memory"] = {}
+        meta["last_reset"] = now
+        save_persistent_state()
+
+
+def get_deep_user(uid: int) -> Dict[str, Any]:
+    deep_monthly_reset_if_needed()
+    root = _deep_root()
+    key = str(uid)
+    if key not in root:
+        root[key] = {
+            "messages": [],
+            "topics": [],
+            "personality": {
+                "friendliness": 5,
+                "toxicity": 5,
+                "respect": 5,
+                "sarcasm": 5,
+            },
+            "mood": "normal",
+            "last_interaction": _now_ts(),
+        }
+        save_persistent_state()
+    return root[key]
+
+
+def deep_add_message(uid: int, text: str):
+    user = get_deep_user(uid)
+    clean = (text or "").strip()
+    if not clean:
+        return
+    user["messages"].append(clean)
+    if len(user["messages"]) > DEEP_MAX_MESSAGES:
+        user["messages"] = user["messages"][-DEEP_MAX_MESSAGES:]
+    user["last_interaction"] = _now_ts()
+    save_persistent_state()
+
+
+def deep_add_topic(uid: int, text: str):
+    user = get_deep_user(uid)
+    tl = (text or "").lower()
+
+    topic_keywords = [
+        "game", "gaming", "discord", "bot", "pc", "phone", "server", "music",
+        "video", "ban", "error", "help", "school", "college", "love",
+        "breakup", "life", "youtube"
+    ]
+    topic = None
+    for k in topic_keywords:
+        if k in tl:
+            topic = k
+            break
+    if not topic:
+        return
+    if topic not in user["topics"]:
+        user["topics"].append(topic)
+    if len(user["topics"]) > DEEP_MAX_TOPICS:
+        user["topics"] = user["topics"][-DEEP_MAX_TOPICS:]
+    save_persistent_state()
+
+
+def deep_evolve_personality(uid: int, text: str):
+    user = get_deep_user(uid)
+    traits = user["personality"]
+    tl = (text or "").lower()
+
+    toxic_words = ["mc", "bc", "madarchod", "bhosd", "fuck", "gandu", "chutiya"]
+    polite_words = ["thanks", "thank you", "please", "pls", "bro", "bhai", "love u", "love you"]
+
+    if any(w in tl for w in toxic_words):
+        traits["toxicity"] = min(10, traits["toxicity"] + 1)
+        traits["respect"] = max(0, traits["respect"] - 1)
+    elif any(w in tl for w in polite_words):
+        traits["friendliness"] = min(10, traits["friendliness"] + 1)
+        traits["respect"] = min(10, traits["respect"] + 1)
+    else:
+        traits["friendliness"] = min(10, traits["friendliness"] + 0.1)
+
+    save_persistent_state()
+
+
+def deep_update_mood(uid: int, text: str):
+    user = get_deep_user(uid)
+    tl = (text or "").lower()
+    toxic_words = ["mc", "bc", "madarchod", "bhosd", "fuck", "gandu", "chutiya"]
+    positive_words = ["love", "thanks", "thank you", "nice", "good", "awesome", "bhai"]
+
+    if any(w in tl for w in toxic_words):
+        user["mood"] = "angry"
+    elif any(w in tl for w in positive_words):
+        user["mood"] = "happy"
+    elif len(text) > 50:
+        user["mood"] = "chill"
+    else:
+        # kabhi kabhi halka sarcastic mood
+        if random.random() < 0.05:
+            user["mood"] = "sarcastic"
+    save_persistent_state()
+
+
+def deep_mood_prefix(uid: int) -> str:
+    user = get_deep_user(uid)
+    mood = user.get("mood", "normal")
+    if mood == "happy":
+        return "😊 | "
+    if mood == "angry":
+        return "😠 | "
+    if mood == "sarcastic":
+        return "😏 | "
+    if mood == "chill":
+        return "😎 | "
+    return ""
+
+
+def process_deep_memory(uid: int, text: str):
+    """
+    Har user ke message par Ultra Memory update:
+    - last 50 msgs
+    - last 10 topics
+    - personality traits
+    - mood
+    """
+    deep_add_message(uid, text)
+    deep_add_topic(uid, text)
+    deep_evolve_personality(uid, text)
+    deep_update_mood(uid, text)
 # ---------- PART 3: Roasts, profanity markers, language helpers, send_long_message ----------
 
 # LIGHT roasts (safe)
@@ -252,7 +418,7 @@ DEVANAGARI_RE = re.compile(r"[\u0900-\u097F]")
 
 
 def choose_roast(name: str, profane: bool = False) -> str:
-    # MIXED style (funny + savage + straight) – option D
+    # MIXED style (funny + savage + straight)
     if profane:
         return random.choice(PROFANE_ROASTS).format(name=name)
     return random.choice(SAFE_ROASTS).format(name=name)
@@ -266,7 +432,10 @@ async def send_long_message(channel: discord.abc.Messageable, text: str):
     for i in range(0, len(text), max_len):
         await channel.send(text[i:i + max_len])
         await asyncio.sleep(0.06)
+
+
 # ---------- PART 4: Live-search helpers + prompt builder ----------
+
 def perform_search_serpapi(query: str, num: int = 3) -> str:
     if not SERPAPI_KEY:
         return ""
@@ -312,7 +481,10 @@ def perform_live_search(query: str) -> str:
     return ""
 
 
-def build_normal_prompt(user_name: str, user_text: str, owner_flag: bool, lang: str) -> str:
+def build_normal_prompt(user_name: str, user_text: str, owner_flag: bool, lang: str, uid: Optional[int] = None) -> str:
+    """
+    ORIGINAL behaviour + Ultra Memory injection.
+    """
     mode = RUNTIME_SETTINGS.get("mode", "funny")
     tone = {
         "funny": "masti + light roast",
@@ -357,14 +529,41 @@ def build_normal_prompt(user_name: str, user_text: str, owner_flag: bool, lang: 
             + ". Keep answers short (2–6 lines) and avoid long lectures."
         )
 
+    memory_block = ""
+    if uid is not None:
+        u = get_deep_user(uid)
+        last_msgs = u.get("messages", [])[-10:]
+        topics = u.get("topics", [])
+        traits = u.get("personality", {})
+        mood = u.get("mood", "normal")
+        memory_block = f"""
+[USER PROFILE MEMORY]
+- Friendliness: {traits.get('friendliness', 5):.1f}/10
+- Toxicity: {traits.get('toxicity', 5):.1f}/10
+- Respect: {traits.get('respect', 5):.1f}/10
+- Sarcasm: {traits.get('sarcasm', 5):.1f}/10
+- Mood: {mood}
+
+[LAST 10 USER MESSAGES]
+{json.dumps(last_msgs, ensure_ascii=False)}
+
+[USER TOPICS]
+{json.dumps(topics, ensure_ascii=False)}
+"""
+
     prompt = f"""{lang_preamble}
 
+{memory_block}
+
+User name: {user_name}
 User message: {user_text}
 
 Answer concisely in chat style. If additional info from web is provided, you may use it.
 Avoid monologues; keep it crisp and readable for Discord.
 """
     return prompt
+
+
 # ---------- PART 5: Simplify previous reply + Hybrid ask_pappu ----------
 
 async def simplify_previous_reply(
@@ -377,7 +576,6 @@ async def simplify_previous_reply(
     Jab koi user Pappu ke kisi reply par 'isko asaan/simple way me bata' type
     reply kare, to yeh helper usi answer ka easy + short version nikalta hai.
     """
-    owner_flag = is_owner(user)
     lang = choose_language_for_reply(original_message.content)
 
     if lang == "hi":
@@ -424,7 +622,7 @@ Now respond with a simpler, shorter version of your original reply, following th
     await send_long_message(channel, txt)
 
 
-# ✅ NEW: Detailed expansion helper
+# ✅ Detailed expansion helper (pehle se tha, rakh rahe hain)
 async def expand_previous_reply(
     user: discord.abc.User,
     original_message: discord.Message,
@@ -488,7 +686,7 @@ async def ask_pappu(user: discord.abc.User, text: str, is_announcement: bool, ch
     # strict language choice per owner's english_lock setting
     lang = choose_language_for_reply(text)  # 'en' or 'hi'
 
-    # improved follow-up resolution using short context
+    # improved follow-up resolution using short context (ye same rakha)
     ctx = get_context(user.id)
     short_followups = [
         "naam", "name",
@@ -522,7 +720,7 @@ async def ask_pappu(user: discord.abc.User, text: str, is_announcement: bool, ch
 
     # If Gemini model present, prefer it
     if model is not None:
-        prompt = build_normal_prompt(user.display_name, text, owner_flag, lang)
+        prompt = build_normal_prompt(user.display_name, text, owner_flag, lang, uid=user.id)
         if search_summary:
             prompt += f"\nSearch results for you to optionally use:\n{search_summary}\n\n"
 
@@ -541,7 +739,7 @@ async def ask_pappu(user: discord.abc.User, text: str, is_announcement: bool, ch
                 if not out:
                     out = search_summary or "Papa ji, thoda blank sa aa gaya. Dobara bhejo."
 
-                # save context items if extractable
+                # save context items if extractable (ye tumhara purana logic)
                 items = []
                 for line in out.splitlines():
                     l = line.strip()
@@ -558,7 +756,9 @@ async def ask_pappu(user: discord.abc.User, text: str, is_announcement: bool, ch
                             pass
                     set_context(user.id, subj, text, items=items)
 
-                await send_long_message(channel, out)
+                # 🔥 Yahan Ultra Memory ka mood prefix bhi use kar rahe
+                pref = deep_mood_prefix(user.id)
+                await send_long_message(channel, pref + out)
                 return
         except Exception as e:
             await channel.send(f"Gemini error/timeout: {e}. Falling back to simple reply.")
@@ -568,7 +768,7 @@ async def ask_pappu(user: discord.abc.User, text: str, is_announcement: bool, ch
         await send_long_message(channel, f"Live search results:\n\n{search_summary}")
         return
 
-    # Simple fallback reply (canned)
+    # Simple fallback reply (canned) – same jaisa pehle tha
     mode = RUNTIME_SETTINGS.get("mode", "funny")
     if mode == "funny":
         base = f"Haan {name}, bol kya scene hai? 😎\nShort: {text[:200]}"
@@ -581,7 +781,8 @@ async def ask_pappu(user: discord.abc.User, text: str, is_announcement: bool, ch
         reply = f"Hey {name}, (English mode) — {base}"
     else:
         reply = f"{base} (Hinglish mode)"
-    await send_long_message(channel, reply)
+    pref = deep_mood_prefix(user.id)
+    await send_long_message(channel, pref + reply)
 # ---------- PART 6: SECRET ADMIN + OWNER NL ADMIN ----------
 async def handle_secret_admin(message: discord.Message, clean_text: str) -> bool:
     if not is_owner(message.author):
@@ -782,7 +983,6 @@ async def handle_secret_admin(message: discord.Message, clean_text: str) -> bool
     # BAN
     if "ban" in text and "unban" not in text:
         if not target_member:
-            # yahan ab Pappu ulta "mention karo" nahi bolega – sirf samjhega ki info di gayi hai
             await message.channel.send(
                 "Samajh gaya Papa ji, kisi ko ban kiya gaya hai ya ban ki baat ho rahi hai. "
                 "Agar mujhe kisi ko ban karwana ho to @mention ke saath bolna. 🙂"
@@ -847,6 +1047,8 @@ async def handle_secret_admin(message: discord.Message, clean_text: str) -> bool
         return True
 
     return False
+
+
 # ---------- PART 7: Events + commands (on_message includes auto-retaliation) ----------
 @bot.event
 async def on_ready():
@@ -867,6 +1069,9 @@ async def on_message(message: discord.Message):
 
     content = message.content or ""
     content_lower = content.lower()
+
+    # 🔥 ULTRA MEMORY HOOK – har non-bot message log + traits + mood
+    process_deep_memory(message.author.id, content)
 
     # ---------- SUPER FOLLOW-UP HANDLER (Detail expansion on reply) ----------
     if (
@@ -932,9 +1137,7 @@ async def on_message(message: discord.Message):
                 await bot.process_commands(message)
                 return
 
-        # -----------------------------------
         # Creator / Owner questions
-        # -----------------------------------
         creator_triggers = [
             "kisne banaya", "kisne tumhe banaya", "kisne tume banaya",
             "who made you", "who created you", "creator kaun",
@@ -950,10 +1153,7 @@ async def on_message(message: discord.Message):
             await bot.process_commands(message)
             return
 
-        # -----------------------------------
-        # AUTO-RETALIATE ON INSULTS – MODE A
-        #  sirf jab Pappu ko gaali di ho
-        # -----------------------------------
+        # AUTO-RETALIATE ON INSULTS – sirf jab Pappu ko gaali di ho
         has_profanity = any(k in lowered for k in PROFANE_KEYWORDS)
         insult_to_bot = False
 
@@ -967,7 +1167,6 @@ async def on_message(message: discord.Message):
 
         if has_profanity and insult_to_bot:
             if RUNTIME_SETTINGS.get("allow_profanity", False):
-                # self-defense: gaali dene wala banda = author
                 roaster_name = get_nice_name(message.author)
                 roast = choose_roast(roaster_name, profane=True)
                 await message.channel.send(roast)
@@ -978,9 +1177,7 @@ async def on_message(message: discord.Message):
                 await bot.process_commands(message)
                 return
 
-        # -----------------------------------
         # Normal chat
-        # -----------------------------------
         if not clean_text or clean_text.lower() in ["pappu", "pappu?", "pappu!", "pappu bot"]:
             name = get_nice_name(message.author)
             await message.channel.send(f"Haan {name}, bol kya scene hai? 😎")
@@ -1000,6 +1197,8 @@ async def hello_cmd(ctx):
 @bot.command(name="ask")
 async def ask_cmd(ctx, *, question: str):
     await ask_pappu(ctx.author, question, False, ctx.channel)
+
+
 # ---------- PART 8: Run + alias + final save ----------
 # compatibility alias so older callsites keep working
 handle_owner_nl_admin = handle_secret_admin
